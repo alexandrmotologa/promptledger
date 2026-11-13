@@ -3,20 +3,13 @@ import {
   Activity,
   GitBranch,
   ShieldAlert,
-  Sliders,
-  Sparkles,
   Play,
   RotateCcw,
   CheckCircle2,
   AlertTriangle,
-  ArrowRight,
-  TrendingDown,
   TrendingUp,
-  Cpu,
   Layers,
   Terminal,
-  Database,
-  ExternalLink,
   RefreshCw,
   GitCommit,
   User,
@@ -26,7 +19,14 @@ import {
   Eye,
   SlidersHorizontal,
   FileCode,
-  DollarSign
+  Sparkles,
+  Database,
+  Coins,
+  Gauge,
+  CheckSquare,
+  FileCheck2,
+  TrendingDown,
+  Trash2
 } from 'lucide-react';
 import {
   PromptSpec,
@@ -34,11 +34,14 @@ import {
   SystemSummary,
   ExecutionRecord,
   ShadowComparisonRecord,
-  AuditEventRecord
+  AuditEventRecord,
+  CacheStats,
+  ArmStats,
+  EvaluationReport
 } from './types';
 
 export default function App() {
-  const [tab, setTab] = useState<'overview' | 'registry' | 'routing' | 'shadow' | 'gates' | 'playground'>('overview');
+  const [tab, setTab] = useState<'overview' | 'registry' | 'routing' | 'shadow' | 'gates' | 'benchmarks' | 'playground'>('overview');
   const [prompts, setPrompts] = useState<PromptSpec[]>([]);
   const [selectedPromptId, setSelectedPromptId] = useState<string>('');
   const [summary, setSummary] = useState<SystemSummary | null>(null);
@@ -46,16 +49,26 @@ export default function App() {
   const [recentRuns, setRecentRuns] = useState<ExecutionRecord[]>([]);
   const [shadowDiffs, setShadowDiffs] = useState<ShadowComparisonRecord[]>([]);
   const [auditLogs, setAuditLogs] = useState<AuditEventRecord[]>([]);
+  const [cacheStats, setCacheStats] = useState<CacheStats | null>(null);
+  const [banditStats, setBanditStats] = useState<Record<string, ArmStats>>({});
   const [loading, setLoading] = useState<boolean>(true);
   const [simulating, setSimulating] = useState<boolean>(false);
   const [statusMsg, setStatusMsg] = useState<string>('');
 
   // Routing Editor state
+  const [routingStrategy, setRoutingStrategy] = useState<'canary' | 'bandit'>('canary');
   const [canaryWeight, setCanaryWeight] = useState<number>(10);
   const [shadowRate, setShadowRate] = useState<number>(25);
   const [shadowEnabled, setShadowEnabled] = useState<boolean>(true);
+  const [banditEpsilon, setBanditEpsilon] = useState<number>(10);
   const [testUserId, setTestUserId] = useState<string>('usr_enterprise_4021');
   const [hashResult, setHashResult] = useState<string>('');
+
+  // Benchmark / Golden Dataset state
+  const [benchVersion, setBenchVersion] = useState<string>('');
+  const [benchDataset, setBenchDataset] = useState<string>('evals/checkout_intent_eval.jsonl');
+  const [benchReport, setBenchReport] = useState<EvaluationReport | null>(null);
+  const [benchLoading, setBenchLoading] = useState<boolean>(false);
 
   // Playground state
   const [playVersion, setPlayVersion] = useState<string>('auto');
@@ -69,7 +82,7 @@ export default function App() {
 
   useEffect(() => {
     fetchInitialData();
-    const interval = setInterval(fetchMetricsAndRuns, 5000);
+    const interval = setInterval(fetchMetricsAndRuns, 4000);
     return () => clearInterval(interval);
   }, []);
 
@@ -82,19 +95,22 @@ export default function App() {
   const fetchInitialData = async () => {
     setLoading(true);
     try {
-      const [promptsRes, summaryRes, auditRes] = await Promise.all([
+      const [promptsRes, summaryRes, auditRes, cacheRes] = await Promise.all([
         fetch('/v1/prompts'),
         fetch('/v1/analytics/summary'),
         fetch('/v1/audit-logs'),
+        fetch('/v1/cache/stats'),
       ]);
 
       const promptsData = await promptsRes.json();
       const summaryData = await summaryRes.json();
       const auditData = await auditRes.json();
+      const cacheData = await cacheRes.json();
 
       setPrompts(promptsData || []);
       setSummary(summaryData);
       setAuditLogs(auditData || []);
+      setCacheStats(cacheData);
 
       if (promptsData && promptsData.length > 0) {
         const first = promptsData[0];
@@ -104,6 +120,7 @@ export default function App() {
           setDiffV1(versions[0]);
           setDiffV2(versions[1]);
         }
+        setBenchVersion(first.routing.active_version);
       }
     } catch (err) {
       console.error('Failed to load initial data:', err);
@@ -114,19 +131,19 @@ export default function App() {
 
   const fetchPromptDetails = async (id: string) => {
     try {
-      const [metricsRes, runsRes, shadowRes] = await Promise.all([
+      const [metricsRes, runsRes, shadowRes, banditRes, cacheRes] = await Promise.all([
         fetch(`/v1/prompts/${id}/metrics`),
         fetch(`/v1/prompts/${id}/runs`),
         fetch(`/v1/prompts/${id}/shadow-diff`),
+        fetch(`/v1/prompts/${id}/bandit`),
+        fetch('/v1/cache/stats'),
       ]);
 
-      const m = await metricsRes.json();
-      const r = await runsRes.json();
-      const s = await shadowRes.json();
-
-      setMetrics(m);
-      setRecentRuns(r || []);
-      setShadowDiffs(s || []);
+      setMetrics(await metricsRes.json());
+      setRecentRuns(await runsRes.json() || []);
+      setShadowDiffs(await shadowRes.json() || []);
+      setBanditStats(await banditRes.json() || {});
+      setCacheStats(await cacheRes.json());
 
       const current = prompts.find(p => p.prompt_id === id);
       if (current) {
@@ -134,6 +151,9 @@ export default function App() {
         setCanaryWeight(canary ? canary.weight : 0);
         setShadowRate(Math.round(current.routing.shadow.sample_rate * 100));
         setShadowEnabled(current.routing.shadow.enabled);
+        setRoutingStrategy((current.routing.strategy === 'bandit' || current.routing.bandit?.enabled) ? 'bandit' : 'canary');
+        setBanditEpsilon(current.routing.bandit?.epsilon ? Math.round(current.routing.bandit.epsilon * 100) : 10);
+        setBenchVersion(current.routing.active_version);
 
         const vKeys = Object.keys(current.versions || {});
         if (vKeys.length >= 2 && (!diffV1 || !current.versions[diffV1])) {
@@ -149,12 +169,14 @@ export default function App() {
   const fetchMetricsAndRuns = async () => {
     if (!selectedPromptId) return;
     try {
-      const [summaryRes, metricsRes, runsRes, shadowRes, auditRes] = await Promise.all([
+      const [summaryRes, metricsRes, runsRes, shadowRes, auditRes, banditRes, cacheRes] = await Promise.all([
         fetch('/v1/analytics/summary'),
         fetch(`/v1/prompts/${selectedPromptId}/metrics`),
         fetch(`/v1/prompts/${selectedPromptId}/runs`),
         fetch(`/v1/prompts/${selectedPromptId}/shadow-diff`),
         fetch('/v1/audit-logs'),
+        fetch(`/v1/prompts/${selectedPromptId}/bandit`),
+        fetch('/v1/cache/stats'),
       ]);
 
       setSummary(await summaryRes.json());
@@ -162,14 +184,16 @@ export default function App() {
       setRecentRuns(await runsRes.json() || []);
       setShadowDiffs(await shadowRes.json() || []);
       setAuditLogs(await auditRes.json() || []);
+      setBanditStats(await banditRes.json() || {});
+      setCacheStats(await cacheRes.json());
     } catch (e) {
-      // Quiet poll error
+      // Quiet poll
     }
   };
 
   const handleSimulateTraffic = async () => {
     setSimulating(true);
-    setStatusMsg('Generating 15 production requests across canary & shadow paths...');
+    setStatusMsg('Simulating 15 requests across canary, cache & shadow paths...');
     try {
       await fetch('/v1/simulate-traffic', {
         method: 'POST',
@@ -184,6 +208,39 @@ export default function App() {
       setStatusMsg('Error simulating traffic');
     } finally {
       setSimulating(false);
+    }
+  };
+
+  const handleClearCache = async () => {
+    try {
+      await fetch('/v1/cache/clear', { method: 'POST' });
+      setStatusMsg('✓ Semantic cache flushed.');
+      await fetchMetricsAndRuns();
+      setTimeout(() => setStatusMsg(''), 4000);
+    } catch (e) {
+      alert('Failed clearing cache');
+    }
+  };
+
+  const handleRunBenchmark = async () => {
+    if (!selectedPromptId) return;
+    setBenchLoading(true);
+    setBenchReport(null);
+    try {
+      const res = await fetch(`/v1/prompts/${selectedPromptId}/eval`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          version: benchVersion,
+          dataset: benchDataset,
+        }),
+      });
+      const data = await res.json();
+      setBenchReport(data);
+    } catch (e) {
+      alert('Benchmark execution failed: ' + e);
+    } finally {
+      setBenchLoading(false);
     }
   };
 
@@ -240,13 +297,22 @@ export default function App() {
     ];
 
     const payload = {
-      strategy: 'canary',
+      strategy: routingStrategy,
       active_version: activeVer,
+      fallback_version: activeVer,
       variants: newVariants,
       shadow: {
         enabled: shadowEnabled,
         version: cur.routing.shadow.version || Object.keys(cur.versions)[Object.keys(cur.versions).length - 1],
         sample_rate: shadowRate / 100.0,
+      },
+      bandit: {
+        enabled: routingStrategy === 'bandit',
+        epsilon: banditEpsilon / 100.0,
+        quality_weight: 0.50,
+        latency_weight: 0.25,
+        cost_weight: 0.25,
+        min_runs_to_exploit: 5,
       }
     };
 
@@ -257,7 +323,7 @@ export default function App() {
         body: JSON.stringify(payload),
       });
       if (res.ok) {
-        setStatusMsg('✓ Traffic routing configuration saved.');
+        setStatusMsg(`✓ Traffic routing saved (${routingStrategy.toUpperCase()}).`);
         await fetchInitialData();
         await fetchPromptDetails(cur.prompt_id);
         setTimeout(() => setStatusMsg(''), 4000);
@@ -283,9 +349,9 @@ export default function App() {
     let vType = 'active';
 
     for (const v of cur.routing.variants) {
-      cum += v.Weight || v.weight || 0;
+      cum += v.Weight || (v as any).weight || 0;
       if (bucket < cum) {
-        chosen = v.Version || v.version;
+        chosen = v.Version || (v as any).version;
         vType = chosen === cur.routing.active_version ? 'active' : 'canary';
         break;
       }
@@ -350,17 +416,27 @@ export default function App() {
             <div className="flex items-center space-x-2">
               <span className="font-bold text-base tracking-tight text-white">promptledger</span>
               <span className="text-[10px] uppercase font-mono px-1.5 py-0.5 rounded bg-indigo-500/10 text-indigo-400 border border-indigo-500/20 font-semibold">
-                v1.0.0-PROD
+                v1.1.0-ENTERPRISE
               </span>
             </div>
             <p className="text-[11px] text-slate-400 font-mono hidden md:block">
-              Git-Native Prompt Version Control & Shadow Evaluator
+              Git-Native Prompt VC, MAB Router, Semantic Cache & Golden Evals
             </p>
           </div>
         </div>
 
-        {/* Status ticker & Quick Action Buttons */}
+        {/* Global cache pill & Quick actions */}
         <div className="flex items-center space-x-3">
+          {cacheStats && (
+            <div className="hidden lg:flex items-center space-x-3 px-3 py-1 bg-slate-900 border border-slate-800 rounded-lg text-[11px] font-mono">
+              <span className="text-slate-400">Cache Hits:</span>
+              <span className="text-emerald-400 font-bold">{Math.round(cacheStats.hit_ratio * 100)}%</span>
+              <span className="text-slate-500">•</span>
+              <span className="text-slate-400">Saved:</span>
+              <span className="text-emerald-400 font-bold">${cacheStats.total_dollars_saved.toFixed(5)}</span>
+            </div>
+          )}
+
           {statusMsg && (
             <div className="text-xs bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 px-3 py-1 rounded-full animate-pulse flex items-center space-x-1.5 font-mono">
               <CheckCircle2 className="w-3.5 h-3.5" />
@@ -374,7 +450,15 @@ export default function App() {
             className="flex items-center space-x-1.5 px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold shadow-sm transition disabled:opacity-50"
           >
             <Zap className={`w-3.5 h-3.5 ${simulating ? 'animate-spin' : ''}`} />
-            <span>{simulating ? 'Simulating...' : 'Simulate 15 Requests'}</span>
+            <span>{simulating ? 'Simulating...' : 'Simulate Traffic'}</span>
+          </button>
+
+          <button
+            onClick={handleClearCache}
+            className="p-1.5 rounded-lg border border-slate-700/80 hover:bg-slate-800 text-slate-400 hover:text-rose-400 transition"
+            title="Flush Semantic Cache"
+          >
+            <Trash2 className="w-3.5 h-3.5" />
           </button>
 
           <button
@@ -399,6 +483,8 @@ export default function App() {
               {prompts.map(p => {
                 const isSelected = p.prompt_id === selectedPromptId;
                 const hasCanary = p.routing.variants.some(v => v.version !== p.routing.active_version && (v.weight || (v as any).Weight) > 0);
+                const isBandit = p.routing.strategy === 'bandit' || p.routing.bandit?.enabled;
+
                 return (
                   <button
                     key={p.prompt_id}
@@ -413,6 +499,9 @@ export default function App() {
                       <span className="font-mono truncate">{p.prompt_id}</span>
                       {hasCanary && (
                         <span className="w-2 h-2 rounded-full bg-amber-400 animate-ping" title="Active Canary" />
+                      )}
+                      {isBandit && (
+                        <span className="text-[9px] px-1 rounded bg-indigo-500/20 text-indigo-400">MAB</span>
                       )}
                     </div>
                     <span className="text-[10px] text-slate-400 truncate mt-0.5">
@@ -431,10 +520,11 @@ export default function App() {
             <div className="space-y-1">
               {[
                 { id: 'overview', label: 'Overview & Fleet', icon: Activity },
-                { id: 'registry', label: 'Prompt Versions & Diff', icon: GitBranch },
-                { id: 'routing', label: 'Traffic Split & Canary', icon: SlidersHorizontal },
+                { id: 'registry', label: 'Prompt Specs & Diff', icon: GitBranch },
+                { id: 'routing', label: 'Traffic Router & Bandit', icon: SlidersHorizontal },
                 { id: 'shadow', label: 'Shadow Diff Inspector', icon: Eye },
                 { id: 'gates', label: 'Safety Gates & Rollback', icon: ShieldAlert },
+                { id: 'benchmarks', label: 'Golden Evals & CI/CD', icon: FileCheck2 },
                 { id: 'playground', label: 'Live Test Console', icon: Terminal },
               ].map(item => {
                 const Icon = item.icon;
@@ -457,22 +547,21 @@ export default function App() {
             </div>
           </div>
 
-          {/* Health & Engine Meta Box */}
+          {/* Engine Status Box */}
           <div className="mt-auto p-3 rounded-lg bg-slate-850/60 border border-slate-800 text-[11px] space-y-1.5 font-mono">
             <div className="flex justify-between text-slate-400">
-              <span>Engine Status:</span>
-              <span className="text-emerald-400 font-semibold flex items-center space-x-1">
-                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
-                <span>ONLINE</span>
-              </span>
+              <span>Prometheus:</span>
+              <a href="/metrics" target="_blank" className="text-indigo-400 hover:underline flex items-center space-x-1">
+                <span>/metrics</span>
+              </a>
             </div>
             <div className="flex justify-between text-slate-400">
               <span>Router Overhead:</span>
-              <span className="text-indigo-400 font-semibold">&lt; 0.25 µs</span>
+              <span className="text-emerald-400 font-semibold">&lt; 0.25 µs</span>
             </div>
             <div className="flex justify-between text-slate-400">
-              <span>Storage WAL:</span>
-              <span className="text-slate-300">SQLite ACTIVE</span>
+              <span>Cache Engine:</span>
+              <span className="text-slate-300">{cacheStats?.cached_items_count || 0} keys</span>
             </div>
           </div>
         </nav>
@@ -482,7 +571,7 @@ export default function App() {
           {/* TAB 1: OVERVIEW */}
           {tab === 'overview' && (
             <div className="space-y-6">
-              {/* Summary Metric Cards */}
+              {/* Summary Cards */}
               <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-3">
                 <div className="p-4 rounded-xl bg-[#0b0f17] border border-slate-800">
                   <div className="text-slate-400 text-xs font-medium">Registered Prompts</div>
@@ -505,33 +594,35 @@ export default function App() {
                 <div className="p-4 rounded-xl bg-[#0b0f17] border border-slate-800">
                   <div className="text-slate-400 text-xs font-medium">P95 Router Latency</div>
                   <div className="text-2xl font-bold text-indigo-400 mt-1 font-mono">
-                    {metrics ? `${metrics.versions[metrics.active_version]?.p95_latency_ms || 118}ms` : '112ms'}
+                    {metrics ? `${metrics.versions[metrics.active_version]?.p95_latency_ms || 112}ms` : '112ms'}
                   </div>
-                  <div className="text-[10px] text-slate-400 mt-1">&lt; 2ms overhead SLA</div>
+                  <div className="text-[10px] text-slate-400 mt-1">&lt; 0.25µs overhead</div>
+                </div>
+
+                <div className="p-4 rounded-xl bg-[#0b0f17] border border-slate-800">
+                  <div className="text-slate-400 text-xs font-medium">Cache Hit Ratio</div>
+                  <div className="text-2xl font-bold text-emerald-400 mt-1 font-mono">
+                    {cacheStats ? `${Math.round(cacheStats.hit_ratio * 100)}%` : '0%'}
+                  </div>
+                  <div className="text-[10px] text-emerald-400 mt-1">
+                    {cacheStats?.total_latency_saved_ms || 0}ms saved
+                  </div>
                 </div>
 
                 <div className="p-4 rounded-xl bg-[#0b0f17] border border-slate-800">
                   <div className="text-slate-400 text-xs font-medium">Shadow Agreement</div>
-                  <div className="text-2xl font-bold text-emerald-400 mt-1 font-mono">
+                  <div className="text-2xl font-bold text-purple-400 mt-1 font-mono">
                     {metrics?.avg_shadow_agreement ? `${Math.round(metrics.avg_shadow_agreement * 100)}%` : '96%'}
                   </div>
                   <div className="text-[10px] text-slate-400 mt-1">Semantic match score</div>
                 </div>
 
                 <div className="p-4 rounded-xl bg-[#0b0f17] border border-slate-800">
-                  <div className="text-slate-400 text-xs font-medium">Active Canaries</div>
-                  <div className="text-2xl font-bold text-amber-400 mt-1 font-mono">
-                    {summary?.active_canaries || 1}
+                  <div className="text-slate-400 text-xs font-medium">Cumulative Savings</div>
+                  <div className="text-2xl font-bold text-emerald-400 mt-1 font-mono">
+                    ${(cacheStats?.total_dollars_saved || 0).toFixed(4)}
                   </div>
-                  <div className="text-[10px] text-amber-400/80 mt-1">Automated gating on</div>
-                </div>
-
-                <div className="p-4 rounded-xl bg-[#0b0f17] border border-slate-800">
-                  <div className="text-slate-400 text-xs font-medium">Shadow Executions</div>
-                  <div className="text-2xl font-bold text-purple-400 mt-1 font-mono">
-                    {summary?.total_shadow_runs || 0}
-                  </div>
-                  <div className="text-[10px] text-slate-400 mt-1">Zero user latency impact</div>
+                  <div className="text-[10px] text-slate-400 mt-1">Via semantic cache</div>
                 </div>
               </div>
 
@@ -540,7 +631,7 @@ export default function App() {
                 <div className="p-4 border-b border-slate-800 flex items-center justify-between">
                   <div>
                     <h3 className="font-semibold text-white text-sm">Active Fleet Prompts</h3>
-                    <p className="text-xs text-slate-400">Current routing allocations, active models, and shadow evaluation states.</p>
+                    <p className="text-xs text-slate-400">Current routing allocations, active models, caching, and shadow states.</p>
                   </div>
                   <span className="text-xs font-mono text-slate-400">
                     {prompts.length} prompt services managed
@@ -553,9 +644,9 @@ export default function App() {
                       <tr>
                         <th className="py-3 px-4">Prompt ID</th>
                         <th className="py-3 px-4">Active Version & Model</th>
-                        <th className="py-3 px-4">Traffic Split</th>
+                        <th className="py-3 px-4">Strategy & Split</th>
+                        <th className="py-3 px-4">Semantic Cache</th>
                         <th className="py-3 px-4">Shadow Evaluation</th>
-                        <th className="py-3 px-4">Quality & Gate</th>
                         <th className="py-3 px-4 text-right">Actions</th>
                       </tr>
                     </thead>
@@ -564,6 +655,7 @@ export default function App() {
                         const activeVer = p.routing.active_version;
                         const activeDetail = p.versions[activeVer];
                         const canary = p.routing.variants.find(v => v.version !== activeVer);
+                        const isBandit = p.routing.strategy === 'bandit' || p.routing.bandit?.enabled;
 
                         return (
                           <tr key={p.prompt_id} className="hover:bg-slate-800/30 transition">
@@ -578,27 +670,38 @@ export default function App() {
                               <div className="text-[10px] text-slate-400 mt-1">{activeDetail?.model || 'gpt-4o-mini'}</div>
                             </td>
                             <td className="py-3 px-4">
-                              <div className="flex items-center space-x-2">
-                                <div className="w-28 h-2 rounded-full bg-slate-800 overflow-hidden flex">
-                                  <div
-                                    className="h-full bg-emerald-500"
-                                    style={{ width: `${100 - (canary ? canary.weight : 0)}%` }}
-                                    title={`Active: ${100 - (canary ? canary.weight : 0)}%`}
-                                  />
-                                  {canary && canary.weight > 0 && (
-                                    <div
-                                      className="h-full bg-amber-400"
-                                      style={{ width: `${canary.weight}%` }}
-                                      title={`Canary: ${canary.weight}%`}
-                                    />
-                                  )}
-                                </div>
-                                <span className="text-[11px] text-slate-300">
-                                  {canary && canary.weight > 0
-                                    ? `90 / 10%`
-                                    : `100%`}
+                              {isBandit ? (
+                                <span className="px-2 py-0.5 rounded bg-indigo-500/10 text-indigo-400 border border-indigo-500/20 text-[10px] font-bold">
+                                  BANDIT ADAPTIVE (ε={p.routing.bandit?.epsilon || 0.1})
                                 </span>
-                              </div>
+                              ) : (
+                                <div className="flex items-center space-x-2">
+                                  <div className="w-24 h-2 rounded-full bg-slate-800 overflow-hidden flex">
+                                    <div
+                                      className="h-full bg-emerald-500"
+                                      style={{ width: `${100 - (canary ? canary.weight : 0)}%` }}
+                                    />
+                                    {canary && canary.weight > 0 && (
+                                      <div
+                                        className="h-full bg-amber-400"
+                                        style={{ width: `${canary.weight}%` }}
+                                      />
+                                    )}
+                                  </div>
+                                  <span className="text-[11px] text-slate-300">
+                                    {canary && canary.weight > 0 ? `90/10%` : `100%`}
+                                  </span>
+                                </div>
+                              )}
+                            </td>
+                            <td className="py-3 px-4">
+                              {p.cache?.enabled ? (
+                                <span className="px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-400 text-[10px]">
+                                  ON ({p.cache.ttl_seconds}s)
+                                </span>
+                              ) : (
+                                <span className="text-slate-500 text-[10px]">Off</span>
+                              )}
                             </td>
                             <td className="py-3 px-4">
                               {p.routing.shadow.enabled ? (
@@ -610,12 +713,6 @@ export default function App() {
                                 <span className="text-slate-500 text-[11px]">Disabled</span>
                               )}
                             </td>
-                            <td className="py-3 px-4">
-                              <span className="inline-flex items-center space-x-1 px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 text-[10px]">
-                                <CheckCircle2 className="w-3 h-3" />
-                                <span>PASSING (96%)</span>
-                              </span>
-                            </td>
                             <td className="py-3 px-4 text-right space-x-2">
                               <button
                                 onClick={() => { setSelectedPromptId(p.prompt_id); setTab('routing'); }}
@@ -624,10 +721,10 @@ export default function App() {
                                 Router
                               </button>
                               <button
-                                onClick={() => { setSelectedPromptId(p.prompt_id); setTab('shadow'); }}
+                                onClick={() => { setSelectedPromptId(p.prompt_id); setTab('benchmarks'); }}
                                 className="px-2.5 py-1 rounded bg-indigo-600/20 hover:bg-indigo-600/40 text-indigo-300 text-xs border border-indigo-500/30 transition"
                               >
-                                Shadow Diff
+                                Evals
                               </button>
                             </td>
                           </tr>
@@ -638,7 +735,7 @@ export default function App() {
                 </div>
               </div>
 
-              {/* Real-time Execution Feed */}
+              {/* Real-Time Production Traffic Feed with Waterfall Badges */}
               <div className="rounded-xl bg-[#0b0f17] border border-slate-800 p-4">
                 <div className="flex items-center justify-between mb-3">
                   <div className="flex items-center space-x-2">
@@ -646,12 +743,12 @@ export default function App() {
                     <h3 className="font-semibold text-white text-sm">Real-Time Production Traffic Stream</h3>
                   </div>
                   <span className="text-xs text-slate-400 font-mono">
-                    Showing {recentRuns.length} most recent executions
+                    Showing recent executions with waterfall timing
                   </span>
                 </div>
 
                 <div className="space-y-2">
-                  {recentRuns.slice(0, 5).map(r => (
+                  {recentRuns.slice(0, 6).map(r => (
                     <div
                       key={r.id}
                       className="p-3 rounded-lg bg-slate-900/80 border border-slate-800/80 flex items-center justify-between text-xs font-mono"
@@ -662,12 +759,23 @@ export default function App() {
                             ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
                             : r.variant_type === 'canary'
                             ? 'bg-amber-500/10 text-amber-400 border border-amber-500/20'
+                            : r.variant_type === 'bandit'
+                            ? 'bg-indigo-500/10 text-indigo-400 border border-indigo-500/20'
                             : 'bg-purple-500/10 text-purple-400 border border-purple-500/20'
                         }`}>
                           {r.variant_type.toUpperCase()}
                         </span>
                         <span className="text-white font-semibold">{r.version}</span>
-                        <span className="text-slate-400 hidden sm:inline">{r.model_used}</span>
+                        {r.from_cache && (
+                          <span className="px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-300 text-[9px] font-bold">
+                            CACHED
+                          </span>
+                        )}
+                        {r.budget_downscaled && (
+                          <span className="px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300 text-[9px] font-bold">
+                            BUDGET DOWNSCALE
+                          </span>
+                        )}
                         <span className="text-slate-400 truncate max-w-xs">{r.output_text}</span>
                       </div>
                       <div className="flex items-center space-x-4 text-slate-400">
@@ -679,7 +787,7 @@ export default function App() {
                   ))}
                   {recentRuns.length === 0 && (
                     <div className="text-center py-8 text-slate-400 text-xs">
-                      No executions yet. Click "Simulate 15 Requests" above to populate live traffic data.
+                      No executions recorded yet. Click "Simulate Traffic" above to seed data.
                     </div>
                   )}
                 </div>
@@ -687,7 +795,7 @@ export default function App() {
             </div>
           )}
 
-          {/* TAB 2: REGISTRY & DIFF */}
+          {/* TAB 2: PROMPT SPECS & DIFF */}
           {tab === 'registry' && currentPrompt && (
             <div className="space-y-6">
               <div className="flex items-center justify-between">
@@ -741,15 +849,11 @@ export default function App() {
                             <GitCommit className="w-3 h-3 text-slate-400" />
                             <span>commit {vDetail.commit}</span>
                           </div>
-                          <div className="flex items-center space-x-1.5">
-                            <Clock className="w-3 h-3 text-slate-400" />
-                            <span>{new Date(vDetail.created_at).toLocaleDateString()}</span>
-                          </div>
                         </div>
                       </div>
 
                       <div className="mt-4 pt-3 border-t border-slate-800/80 flex items-center justify-between">
-                        <span className="text-[10px] text-slate-400">Template length: {vDetail.template.length} chars</span>
+                        <span className="text-[10px] text-slate-400">{vDetail.template.length} chars</span>
                         {!isActive && (
                           <button
                             onClick={() => handlePromote(vName)}
@@ -764,7 +868,25 @@ export default function App() {
                 })}
               </div>
 
-              {/* Side-by-Side Prompt Template Diff Inspector */}
+              {/* Declarative Assertions & Budget Badges */}
+              {currentPrompt.evaluations && currentPrompt.evaluations.length > 0 && (
+                <div className="p-4 rounded-xl bg-[#0b0f17] border border-slate-800">
+                  <h4 className="text-xs font-semibold text-white mb-2 flex items-center space-x-2">
+                    <CheckSquare className="w-4 h-4 text-emerald-400" />
+                    <span>Declarative Quality Assertions (YAML Spec)</span>
+                  </h4>
+                  <div className="flex flex-wrap gap-2">
+                    {currentPrompt.evaluations.map((a, idx) => (
+                      <div key={idx} className="p-2 rounded bg-slate-900 border border-slate-800 text-[11px] font-mono">
+                        <span className="text-indigo-400 font-bold uppercase">{a.type}: </span>
+                        <span className="text-slate-300">{a.pattern || (a.banned_words ? a.banned_words.join(', ') : a.rubric)}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Visual Diff */}
               <div className="rounded-xl bg-[#0b0f17] border border-slate-800 p-5">
                 <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-4 pb-4 border-b border-slate-800">
                   <div className="flex items-center space-x-2">
@@ -772,54 +894,39 @@ export default function App() {
                     <h3 className="font-semibold text-white text-sm">Visual Template Diff Inspector</h3>
                   </div>
                   <div className="flex items-center space-x-3 text-xs font-mono">
-                    <div className="flex items-center space-x-1.5">
-                      <span className="text-slate-400">Baseline (V1):</span>
-                      <select
-                        value={diffV1}
-                        onChange={e => setDiffV1(e.target.value)}
-                        className="bg-slate-900 border border-slate-700 rounded px-2 py-1 text-slate-200"
-                      >
-                        {Object.keys(currentPrompt.versions || {}).map(v => (
-                          <option key={v} value={v}>{v}</option>
-                        ))}
-                      </select>
-                    </div>
-
+                    <select
+                      value={diffV1}
+                      onChange={e => setDiffV1(e.target.value)}
+                      className="bg-slate-900 border border-slate-700 rounded px-2 py-1 text-slate-200"
+                    >
+                      {Object.keys(currentPrompt.versions || {}).map(v => (
+                        <option key={v} value={v}>{v}</option>
+                      ))}
+                    </select>
                     <span className="text-slate-400">vs</span>
-
-                    <div className="flex items-center space-x-1.5">
-                      <span className="text-slate-400">Candidate (V2):</span>
-                      <select
-                        value={diffV2}
-                        onChange={e => setDiffV2(e.target.value)}
-                        className="bg-slate-900 border border-slate-700 rounded px-2 py-1 text-slate-200"
-                      >
-                        {Object.keys(currentPrompt.versions || {}).map(v => (
-                          <option key={v} value={v}>{v}</option>
-                        ))}
-                      </select>
-                    </div>
+                    <select
+                      value={diffV2}
+                      onChange={e => setDiffV2(e.target.value)}
+                      className="bg-slate-900 border border-slate-700 rounded px-2 py-1 text-slate-200"
+                    >
+                      {Object.keys(currentPrompt.versions || {}).map(v => (
+                        <option key={v} value={v}>{v}</option>
+                      ))}
+                    </select>
                   </div>
                 </div>
 
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  <div className="p-4 rounded-lg bg-slate-900/90 border border-slate-800 font-mono text-xs">
-                    <div className="flex items-center justify-between text-slate-400 mb-2 pb-2 border-b border-slate-800/80">
-                      <span className="font-bold text-white">{diffV1} (Baseline)</span>
-                      <span className="text-[11px] text-indigo-400">{currentPrompt.versions[diffV1]?.model}</span>
-                    </div>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 font-mono text-xs">
+                  <div className="p-4 rounded-lg bg-slate-900/90 border border-slate-800">
+                    <div className="text-white font-bold mb-2 pb-2 border-b border-slate-800">{diffV1}</div>
                     <pre className="whitespace-pre-wrap text-slate-300 leading-relaxed overflow-x-auto">
-                      {currentPrompt.versions[diffV1]?.template || 'Select version'}
+                      {currentPrompt.versions[diffV1]?.template}
                     </pre>
                   </div>
-
-                  <div className="p-4 rounded-lg bg-slate-900/90 border border-slate-800 font-mono text-xs">
-                    <div className="flex items-center justify-between text-slate-400 mb-2 pb-2 border-b border-slate-800/80">
-                      <span className="font-bold text-white">{diffV2} (Candidate)</span>
-                      <span className="text-[11px] text-indigo-400">{currentPrompt.versions[diffV2]?.model}</span>
-                    </div>
-                    <pre className="whitespace-pre-wrap text-emerald-300/90 leading-relaxed overflow-x-auto">
-                      {currentPrompt.versions[diffV2]?.template || 'Select version'}
+                  <div className="p-4 rounded-lg bg-slate-900/90 border border-slate-800">
+                    <div className="text-white font-bold mb-2 pb-2 border-b border-slate-800">{diffV2}</div>
+                    <pre className="whitespace-pre-wrap text-emerald-300 leading-relaxed overflow-x-auto">
+                      {currentPrompt.versions[diffV2]?.template}
                     </pre>
                   </div>
                 </div>
@@ -827,14 +934,14 @@ export default function App() {
             </div>
           )}
 
-          {/* TAB 3: ROUTING & CANARY */}
+          {/* TAB 3: TRAFFIC ROUTER & BANDIT */}
           {tab === 'routing' && currentPrompt && (
             <div className="space-y-6">
               <div className="flex items-center justify-between">
                 <div>
-                  <h2 className="text-lg font-bold text-white font-mono">Dynamic Traffic Splitter & Canary Router</h2>
+                  <h2 className="text-lg font-bold text-white font-mono">Traffic Router & Multi-Armed Bandit</h2>
                   <p className="text-xs text-slate-400">
-                    Deterministic sticky user bucketing based on hash. Route live requests between Active and Canary variants.
+                    Choose between deterministic weighted canary splitting or adaptive Multi-Armed Bandit optimization.
                   </p>
                 </div>
                 <button
@@ -845,10 +952,44 @@ export default function App() {
                 </button>
               </div>
 
-              {/* Traffic Weight Controls */}
-              <div className="p-5 rounded-xl bg-[#0b0f17] border border-slate-800 space-y-6">
-                <div>
-                  <div className="flex items-center justify-between mb-2">
+              {/* Strategy Selector */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <button
+                  onClick={() => setRoutingStrategy('canary')}
+                  className={`p-4 rounded-xl border text-left transition ${
+                    routingStrategy === 'canary'
+                      ? 'bg-indigo-950/20 border-indigo-500 text-white'
+                      : 'bg-[#0b0f17] border-slate-800 text-slate-400 hover:border-slate-700'
+                  }`}
+                >
+                  <div className="font-bold text-sm">Deterministic Weighted Canary</div>
+                  <p className="text-xs text-slate-400 mt-1 font-sans">
+                    Splits fixed percentage (e.g. 90% Active / 10% Canary) with sticky user hashing.
+                  </p>
+                </button>
+
+                <button
+                  onClick={() => setRoutingStrategy('bandit')}
+                  className={`p-4 rounded-xl border text-left transition ${
+                    routingStrategy === 'bandit'
+                      ? 'bg-indigo-950/20 border-indigo-500 text-white'
+                      : 'bg-[#0b0f17] border-slate-800 text-slate-400 hover:border-slate-700'
+                  }`}
+                >
+                  <div className="font-bold text-sm flex items-center space-x-2">
+                    <span>Adaptive Multi-Armed Bandit</span>
+                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-indigo-500/20 text-indigo-300 font-mono">AI AUTO-TUNE</span>
+                  </div>
+                  <p className="text-xs text-slate-400 mt-1 font-sans">
+                    Dynamically maximizes reward based on quality, latency, and cost using Epsilon-Greedy exploration.
+                  </p>
+                </button>
+              </div>
+
+              {/* Strategy Controls */}
+              {routingStrategy === 'canary' ? (
+                <div className="p-5 rounded-xl bg-[#0b0f17] border border-slate-800 space-y-4">
+                  <div className="flex items-center justify-between mb-1">
                     <label className="text-sm font-semibold text-white">Canary Traffic Weight</label>
                     <span className="font-mono text-sm font-bold text-amber-400">{canaryWeight}% Canary / {100 - canaryWeight}% Active</span>
                   </div>
@@ -861,86 +1002,83 @@ export default function App() {
                     onChange={e => setCanaryWeight(parseInt(e.target.value))}
                     className="w-full accent-indigo-500 cursor-pointer h-2 bg-slate-800 rounded-lg"
                   />
-                  <div className="flex justify-between text-[10px] text-slate-400 font-mono mt-1">
-                    <span>0% (Disabled)</span>
-                    <span>10% (Recommended)</span>
-                    <span>25% (High volume)</span>
-                    <span>50% (50/50 Split)</span>
+                </div>
+              ) : (
+                <div className="p-5 rounded-xl bg-[#0b0f17] border border-slate-800 space-y-4">
+                  <div className="flex items-center justify-between mb-1">
+                    <label className="text-sm font-semibold text-white">Exploration Rate (ε Epsilon)</label>
+                    <span className="font-mono text-sm font-bold text-indigo-400">{banditEpsilon}% Explore / {100 - banditEpsilon}% Exploit</span>
+                  </div>
+                  <input
+                    type="range"
+                    min="5"
+                    max="30"
+                    step="1"
+                    value={banditEpsilon}
+                    onChange={e => setBanditEpsilon(parseInt(e.target.value))}
+                    className="w-full accent-indigo-500 cursor-pointer h-2 bg-slate-800 rounded-lg"
+                  />
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-3 pt-3">
+                    {Object.entries(banditStats).map(([v, s]) => (
+                      <div key={v} className="p-3 rounded-lg bg-slate-900 border border-slate-800 font-mono text-xs">
+                        <div className="text-white font-bold">{v}</div>
+                        <div className="text-indigo-400 mt-1">Reward: {s.average_reward.toFixed(3)}</div>
+                        <div className="text-slate-400 text-[10px] mt-1">{s.trials} trials • {Math.round(s.avg_latency_ms)}ms</div>
+                      </div>
+                    ))}
                   </div>
                 </div>
+              )}
 
-                <div className="pt-4 border-t border-slate-800/80">
-                  <div className="flex items-center justify-between mb-3">
-                    <div>
-                      <div className="text-sm font-semibold text-white flex items-center space-x-2">
-                        <span>Zero-Risk Shadow Evaluation Mode</span>
-                        <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-purple-500/10 text-purple-400 border border-purple-500/20">
-                          ASYNC FORK
-                        </span>
-                      </div>
-                      <p className="text-xs text-slate-400 mt-0.5">
-                        Duplicates real production traffic in background goroutines. Evaluates candidate prompt without affecting user response.
-                      </p>
-                    </div>
-                    <label className="relative inline-flex items-center cursor-pointer">
-                      <input
-                        type="checkbox"
-                        checked={shadowEnabled}
-                        onChange={e => setShadowEnabled(e.target.checked)}
-                        className="sr-only peer"
-                      />
-                      <div className="w-11 h-6 bg-slate-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-purple-600"></div>
-                    </label>
+              {/* Shadow Evaluation Controls */}
+              <div className="p-5 rounded-xl bg-[#0b0f17] border border-slate-800 space-y-4">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <h3 className="text-sm font-semibold text-white">Shadow Mode Sampling</h3>
+                    <p className="text-xs text-slate-400">Zero-latency async background candidate evaluation.</p>
                   </div>
-
-                  {shadowEnabled && (
-                    <div className="space-y-2">
-                      <div className="flex items-center justify-between">
-                        <span className="text-xs text-slate-300">Shadow Sample Rate</span>
-                        <span className="font-mono text-xs font-bold text-purple-400">{shadowRate}% of live traffic</span>
-                      </div>
-                      <input
-                        type="range"
-                        min="5"
-                        max="100"
-                        step="5"
-                        value={shadowRate}
-                        onChange={e => setShadowRate(parseInt(e.target.value))}
-                        className="w-full accent-purple-500 cursor-pointer h-2 bg-slate-800 rounded-lg"
-                      />
-                    </div>
-                  )}
+                  <label className="relative inline-flex items-center cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={shadowEnabled}
+                      onChange={e => setShadowEnabled(e.target.checked)}
+                      className="sr-only peer"
+                    />
+                    <div className="w-11 h-6 bg-slate-800 rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-purple-600"></div>
+                  </label>
                 </div>
+                {shadowEnabled && (
+                  <input
+                    type="range"
+                    min="5"
+                    max="100"
+                    step="5"
+                    value={shadowRate}
+                    onChange={e => setShadowRate(parseInt(e.target.value))}
+                    className="w-full accent-purple-500 cursor-pointer h-2 bg-slate-800 rounded-lg"
+                  />
+                )}
               </div>
 
-              {/* Deterministic Hash Tester */}
+              {/* Hash Simulator */}
               <div className="p-5 rounded-xl bg-[#0b0f17] border border-slate-800">
-                <div className="flex items-center space-x-2 mb-3">
-                  <Split className="w-4 h-4 text-indigo-400" />
-                  <h3 className="text-sm font-semibold text-white">Deterministic User Hash Simulator</h3>
-                </div>
-                <p className="text-xs text-slate-400 mb-4">
-                  Verify which prompt variant an individual customer or tenant will be deterministically routed to.
-                </p>
-
-                <div className="flex flex-col sm:flex-row gap-3">
+                <h3 className="text-sm font-semibold text-white mb-2">Deterministic Hash Simulator</h3>
+                <div className="flex gap-3">
                   <input
                     type="text"
                     value={testUserId}
                     onChange={e => setTestUserId(e.target.value)}
-                    placeholder="Enter User ID or Tenant ID (e.g. usr_1042)"
-                    className="flex-1 bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs font-mono text-white focus:outline-none focus:border-indigo-500"
+                    className="flex-1 bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs font-mono text-white"
                   />
                   <button
                     onClick={calculateHashBucket}
-                    className="px-4 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs font-semibold text-slate-200 transition"
+                    className="px-4 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs font-semibold text-slate-200"
                   >
                     Compute Route
                   </button>
                 </div>
-
                 {hashResult && (
-                  <div className="mt-4 p-3 rounded-lg bg-slate-900/90 border border-indigo-500/30 text-xs font-mono text-emerald-400">
+                  <div className="mt-3 p-3 rounded-lg bg-slate-900 border border-indigo-500/30 text-xs font-mono text-emerald-400">
                     {hashResult}
                   </div>
                 )}
@@ -954,77 +1092,50 @@ export default function App() {
               <div className="flex items-center justify-between">
                 <div>
                   <h2 className="text-lg font-bold text-white font-mono">Shadow Run Quality Diff Inspector</h2>
-                  <p className="text-xs text-slate-400">
-                    Side-by-side comparison of active production outputs vs candidate shadow executions.
-                  </p>
+                  <p className="text-xs text-slate-400">Side-by-side verification of production output vs shadow candidate output.</p>
                 </div>
-                <div className="text-xs font-mono text-slate-400">
-                  {shadowDiffs.length} paired shadow runs captured
-                </div>
+                <div className="text-xs font-mono text-slate-400">{shadowDiffs.length} paired shadow runs</div>
               </div>
 
-              <div className="space-y-4">
-                {shadowDiffs.map(diff => {
-                  const isBetter = diff.verdict === 'better';
-                  const isEquiv = diff.verdict === 'equivalent';
-
-                  return (
-                    <div
-                      key={diff.id}
-                      className="p-5 rounded-xl bg-[#0b0f17] border border-slate-800 space-y-4 font-mono text-xs"
-                    >
-                      {/* Comparison Header Badge */}
-                      <div className="flex flex-wrap items-center justify-between gap-2 pb-3 border-b border-slate-800">
-                        <div className="flex items-center space-x-2">
-                          <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
-                            isBetter
-                              ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
-                              : isEquiv
-                              ? 'bg-indigo-500/10 text-indigo-400 border border-indigo-500/20'
-                              : 'bg-rose-500/10 text-rose-400 border border-rose-500/20'
-                          }`}>
-                            VERDICT: {diff.verdict.toUpperCase()}
-                          </span>
-                          <span className="text-white font-bold">{diff.prompt_id}</span>
-                        </div>
-
-                        <div className="flex items-center space-x-4 text-slate-400 text-[11px]">
-                          <span>Semantic Agreement: <strong className="text-white">{Math.round(diff.quality_score * 100)}%</strong></span>
-                          <span>Latency Delta: <strong className={diff.latency_delta_ms <= 0 ? 'text-emerald-400' : 'text-rose-400'}>{diff.latency_delta_ms}ms</strong></span>
-                          <span>Cost Delta: <strong className={diff.cost_delta_usd <= 0 ? 'text-emerald-400' : 'text-rose-400'}>${diff.cost_delta_usd.toFixed(6)}</strong></span>
-                        </div>
+              <div className="space-y-4 font-mono text-xs">
+                {shadowDiffs.map(diff => (
+                  <div key={diff.id} className="p-5 rounded-xl bg-[#0b0f17] border border-slate-800 space-y-4">
+                    <div className="flex flex-wrap items-center justify-between gap-2 pb-3 border-b border-slate-800">
+                      <div className="flex items-center space-x-2">
+                        <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
+                          diff.verdict === 'better'
+                            ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
+                            : diff.verdict === 'equivalent'
+                            ? 'bg-indigo-500/10 text-indigo-400 border border-indigo-500/20'
+                            : 'bg-rose-500/10 text-rose-400 border border-rose-500/20'
+                        }`}>
+                          VERDICT: {diff.verdict.toUpperCase()}
+                        </span>
+                        <span className="text-white font-bold">{diff.prompt_id}</span>
                       </div>
-
-                      {/* Explanation note */}
-                      <div className="text-xs text-slate-300 font-sans italic bg-slate-900/60 p-2.5 rounded-lg border border-slate-800/80">
-                        "{diff.explanation}"
-                      </div>
-
-                      {/* Side by side outputs */}
-                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                        <div className="p-3 rounded-lg bg-slate-900/80 border border-slate-800">
-                          <div className="text-slate-400 text-[10px] mb-1 font-bold">
-                            Active Production Output ({diff.active_version})
-                          </div>
-                          <div className="text-slate-200 whitespace-pre-wrap">{diff.active_output || 'Output unavailable'}</div>
-                        </div>
-
-                        <div className="p-3 rounded-lg bg-purple-950/20 border border-purple-500/30">
-                          <div className="text-purple-400 text-[10px] mb-1 font-bold">
-                            Shadow Candidate Output ({diff.shadow_version})
-                          </div>
-                          <div className="text-purple-200 whitespace-pre-wrap">{diff.shadow_output || 'Output unavailable'}</div>
-                        </div>
+                      <div className="flex items-center space-x-4 text-slate-400 text-[11px]">
+                        <span>Agreement: <strong className="text-white">{Math.round(diff.quality_score * 100)}%</strong></span>
+                        <span>Latency Delta: <strong className={diff.latency_delta_ms <= 0 ? 'text-emerald-400' : 'text-rose-400'}>{diff.latency_delta_ms}ms</strong></span>
+                        <span>Cost Delta: <strong className={diff.cost_delta_usd <= 0 ? 'text-emerald-400' : 'text-rose-400'}>${diff.cost_delta_usd.toFixed(6)}</strong></span>
                       </div>
                     </div>
-                  );
-                })}
 
-                {shadowDiffs.length === 0 && (
-                  <div className="text-center py-12 rounded-xl bg-[#0b0f17] border border-slate-800 text-slate-400 text-xs">
-                    No shadow runs recorded yet. Enable Shadow Mode in the Traffic Split tab and simulate traffic.
+                    <div className="text-xs text-slate-300 font-sans italic bg-slate-900/60 p-2.5 rounded-lg border border-slate-800">
+                      "{diff.explanation}"
+                    </div>
+
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                      <div className="p-3 rounded-lg bg-slate-900 border border-slate-800">
+                        <div className="text-slate-400 text-[10px] mb-1 font-bold">Active Production Output ({diff.active_version})</div>
+                        <div className="text-slate-200 whitespace-pre-wrap">{diff.active_output || 'Output unavailable'}</div>
+                      </div>
+                      <div className="p-3 rounded-lg bg-purple-950/20 border border-purple-500/30">
+                        <div className="text-purple-400 text-[10px] mb-1 font-bold">Shadow Candidate Output ({diff.shadow_version})</div>
+                        <div className="text-purple-200 whitespace-pre-wrap">{diff.shadow_output || 'Output unavailable'}</div>
+                      </div>
+                    </div>
                   </div>
-                )}
+                ))}
               </div>
             </div>
           )}
@@ -1034,21 +1145,19 @@ export default function App() {
             <div className="space-y-6">
               <div className="flex items-center justify-between">
                 <div>
-                  <h2 className="text-lg font-bold text-white font-mono">Automated Safety Gates & Instant Rollback</h2>
-                  <p className="text-xs text-slate-400">
-                    Statistically driven promotion criteria and automated circuit-breaker rollback gates.
-                  </p>
+                  <h2 className="text-lg font-bold text-white font-mono">Automated Safety Gates & Rollback</h2>
+                  <p className="text-xs text-slate-400">Statistical threshold gates and circuit breaker rollbacks.</p>
                 </div>
                 <div className="flex items-center space-x-2">
                   <button
                     onClick={() => handlePromote()}
-                    className="px-3.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-semibold text-xs transition"
+                    className="px-3.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-semibold text-xs"
                   >
                     1-Click Promote Canary
                   </button>
                   <button
                     onClick={handleRollback}
-                    className="px-3.5 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-500 text-white font-semibold text-xs transition flex items-center space-x-1"
+                    className="px-3.5 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-500 text-white font-semibold text-xs flex items-center space-x-1"
                   >
                     <RotateCcw className="w-3.5 h-3.5" />
                     <span>Instant Rollback</span>
@@ -1056,22 +1165,19 @@ export default function App() {
                 </div>
               </div>
 
-              {/* Thresholds Cards */}
               <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                 <div className="p-4 rounded-xl bg-[#0b0f17] border border-slate-800">
                   <div className="text-xs text-slate-400 font-medium">Quality Gate</div>
                   <div className="text-xl font-bold text-emerald-400 font-mono mt-1">
                     ≥ {Math.round(currentPrompt.gates.min_quality_score * 100)}%
                   </div>
-                  <p className="text-[11px] text-slate-400 mt-1">Minimum semantic agreement score required to promote candidate.</p>
                 </div>
 
                 <div className="p-4 rounded-xl bg-[#0b0f17] border border-slate-800">
-                  <div className="text-xs text-slate-400 font-medium">Latency Ceiling Gate</div>
+                  <div className="text-xs text-slate-400 font-medium">Latency Ceiling</div>
                   <div className="text-xl font-bold text-indigo-400 font-mono mt-1">
                     ≤ {currentPrompt.gates.max_p95_latency_ms}ms
                   </div>
-                  <p className="text-[11px] text-slate-400 mt-1">Maximum allowed P95 execution duration.</p>
                 </div>
 
                 <div className="p-4 rounded-xl bg-[#0b0f17] border border-slate-800">
@@ -1079,19 +1185,15 @@ export default function App() {
                   <div className="text-xl font-bold text-rose-400 font-mono mt-1">
                     ≤ {(currentPrompt.gates.max_error_rate * 100).toFixed(1)}%
                   </div>
-                  <p className="text-[11px] text-slate-400 mt-1">Automatic rollback triggers immediately if canary error rate exceeds this.</p>
                 </div>
               </div>
 
               {/* Policy Audit Trail */}
               <div className="rounded-xl bg-[#0b0f17] border border-slate-800 p-5">
-                <h3 className="text-sm font-semibold text-white mb-3">Policy Audit & Promotion Log</h3>
+                <h3 className="text-sm font-semibold text-white mb-3">Policy Audit Trail</h3>
                 <div className="space-y-2">
                   {auditLogs.map(log => (
-                    <div
-                      key={log.id}
-                      className="p-3 rounded-lg bg-slate-900 border border-slate-800/80 flex items-center justify-between text-xs font-mono"
-                    >
+                    <div key={log.id} className="p-3 rounded-lg bg-slate-900 border border-slate-800 flex items-center justify-between text-xs font-mono">
                       <div className="flex items-center space-x-3">
                         <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
                           log.action === 'promote'
@@ -1109,35 +1211,145 @@ export default function App() {
                       </div>
                     </div>
                   ))}
-                  {auditLogs.length === 0 && (
-                    <div className="text-center py-6 text-slate-400 text-xs">
-                      No promotion or rollback events logged yet.
-                    </div>
-                  )}
                 </div>
               </div>
             </div>
           )}
 
-          {/* TAB 6: PLAYGROUND */}
+          {/* TAB 6: GOLDEN EVALS & CI/CD */}
+          {tab === 'benchmarks' && currentPrompt && (
+            <div className="space-y-6">
+              <div className="flex items-center justify-between">
+                <div>
+                  <h2 className="text-lg font-bold text-white font-mono">Offline Golden Benchmark Runner</h2>
+                  <p className="text-xs text-slate-400">
+                    Execute regression benchmarks against JSONL test suites before promoting canaries.
+                  </p>
+                </div>
+                <button
+                  onClick={handleRunBenchmark}
+                  disabled={benchLoading}
+                  className="px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white font-semibold text-xs flex items-center space-x-1.5 transition disabled:opacity-50"
+                >
+                  <FileCheck2 className={`w-3.5 h-3.5 ${benchLoading ? 'animate-spin' : ''}`} />
+                  <span>{benchLoading ? 'Executing Benchmark...' : 'Run Golden Benchmark'}</span>
+                </button>
+              </div>
+
+              {/* Benchmark Configuration Bar */}
+              <div className="p-4 rounded-xl bg-[#0b0f17] border border-slate-800 flex flex-col sm:flex-row gap-4 items-center justify-between">
+                <div className="flex items-center space-x-3 w-full sm:w-auto">
+                  <label className="text-xs text-slate-400 font-mono">Target Version:</label>
+                  <select
+                    value={benchVersion}
+                    onChange={e => setBenchVersion(e.target.value)}
+                    className="bg-slate-900 border border-slate-700 rounded px-2.5 py-1 text-xs font-mono text-white"
+                  >
+                    {Object.keys(currentPrompt.versions || {}).map(v => (
+                      <option key={v} value={v}>{v} ({currentPrompt.versions[v].model})</option>
+                    ))}
+                  </select>
+                </div>
+
+                <div className="flex items-center space-x-3 w-full sm:w-auto">
+                  <label className="text-xs text-slate-400 font-mono">Dataset:</label>
+                  <input
+                    type="text"
+                    value={benchDataset}
+                    onChange={e => setBenchDataset(e.target.value)}
+                    className="bg-slate-900 border border-slate-700 rounded px-3 py-1 text-xs font-mono text-white w-64"
+                  />
+                </div>
+              </div>
+
+              {/* Benchmark Results */}
+              {benchReport && (
+                <div className="space-y-4">
+                  <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                    <div className="p-4 rounded-xl bg-[#0b0f17] border border-slate-800">
+                      <div className="text-slate-400 text-xs">Pass Rate</div>
+                      <div className="text-2xl font-bold text-emerald-400 font-mono mt-1">
+                        {Math.round(benchReport.accuracy_rate * 100)}%
+                      </div>
+                      <div className="text-[10px] text-slate-400">{benchReport.passed_cases}/{benchReport.total_cases} passed</div>
+                    </div>
+
+                    <div className="p-4 rounded-xl bg-[#0b0f17] border border-slate-800">
+                      <div className="text-slate-400 text-xs">P95 Latency</div>
+                      <div className="text-2xl font-bold text-indigo-400 font-mono mt-1">
+                        {benchReport.p95_latency_ms}ms
+                      </div>
+                      <div className="text-[10px] text-slate-400">Avg: {Math.round(benchReport.avg_latency_ms)}ms</div>
+                    </div>
+
+                    <div className="p-4 rounded-xl bg-[#0b0f17] border border-slate-800">
+                      <div className="text-slate-400 text-xs">Total Benchmark Cost</div>
+                      <div className="text-2xl font-bold text-emerald-400 font-mono mt-1">
+                        ${benchReport.total_cost_usd.toFixed(6)}
+                      </div>
+                    </div>
+
+                    <div className="p-4 rounded-xl bg-[#0b0f17] border border-slate-800">
+                      <div className="text-slate-400 text-xs">Quality Gate</div>
+                      <div className="text-2xl font-bold text-emerald-400 font-mono mt-1">
+                        {benchReport.accuracy_rate >= currentPrompt.gates.min_quality_score ? 'PASSED' : 'FAILED'}
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="rounded-xl bg-[#0b0f17] border border-slate-800 overflow-hidden">
+                    <table className="w-full text-left text-xs font-mono">
+                      <thead className="bg-slate-900 text-slate-400 uppercase text-[10px] border-b border-slate-800">
+                        <tr>
+                          <th className="py-2.5 px-3">#</th>
+                          <th className="py-2.5 px-3">Status</th>
+                          <th className="py-2.5 px-3">Latency</th>
+                          <th className="py-2.5 px-3">Cost</th>
+                          <th className="py-2.5 px-3">Output Text</th>
+                          <th className="py-2.5 px-3">Failure Notes</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-800/60">
+                        {benchReport.results.map(r => (
+                          <tr key={r.index} className="hover:bg-slate-800/30">
+                            <td className="py-2.5 px-3">{r.index}</td>
+                            <td className="py-2.5 px-3">
+                              <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
+                                r.passed ? 'bg-emerald-500/10 text-emerald-400' : 'bg-rose-500/10 text-rose-400'
+                              }`}>
+                                {r.passed ? 'PASS' : 'FAIL'}
+                              </span>
+                            </td>
+                            <td className="py-2.5 px-3">{r.latency_ms}ms</td>
+                            <td className="py-2.5 px-3">${r.cost_usd.toFixed(6)}</td>
+                            <td className="py-2.5 px-3 truncate max-w-xs">{r.output_text}</td>
+                            <td className="py-2.5 px-3 text-slate-400">{r.failure_notes || 'All assertions met'}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* TAB 7: PLAYGROUND */}
           {tab === 'playground' && currentPrompt && (
             <div className="space-y-6">
               <div>
                 <h2 className="text-lg font-bold text-white font-mono">Live Prompt Execution Console</h2>
-                <p className="text-xs text-slate-400">
-                  Send arbitrary variable payloads, test individual versions or execute through the live router.
-                </p>
+                <p className="text-xs text-slate-400">Execute with waterfall timing and caching inspection.</p>
               </div>
 
               <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                {/* Input Panel */}
                 <div className="p-5 rounded-xl bg-[#0b0f17] border border-slate-800 space-y-4">
                   <div className="flex items-center justify-between">
-                    <label className="text-xs font-semibold text-white">Target Version</label>
+                    <label className="text-xs font-semibold text-white">Target Variant</label>
                     <select
                       value={playVersion}
                       onChange={e => setPlayVersion(e.target.value)}
-                      className="bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1 text-xs font-mono text-white"
+                      className="bg-slate-900 border border-slate-700 rounded px-2.5 py-1 text-xs font-mono text-white"
                     >
                       <option value="auto">Auto (Live Traffic Router Split)</option>
                       {Object.keys(currentPrompt.versions || {}).map(v => (
@@ -1152,48 +1364,59 @@ export default function App() {
                       rows={8}
                       value={playVars}
                       onChange={e => setPlayVars(e.target.value)}
-                      className="w-full bg-slate-900 border border-slate-700 rounded-lg p-3 text-xs font-mono text-white focus:outline-none focus:border-indigo-500 leading-relaxed"
+                      className="w-full bg-slate-900 border border-slate-700 rounded-lg p-3 text-xs font-mono text-white focus:outline-none focus:border-indigo-500"
                     />
                   </div>
 
                   <button
                     onClick={handleExecutePlayground}
                     disabled={playLoading}
-                    className="w-full py-2.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white font-semibold text-xs transition flex items-center justify-center space-x-2 disabled:opacity-50"
+                    className="w-full py-2.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white font-semibold text-xs flex items-center justify-center space-x-2 transition disabled:opacity-50"
                   >
                     <Play className={`w-3.5 h-3.5 ${playLoading ? 'animate-spin' : ''}`} />
-                    <span>{playLoading ? 'Executing LLM Generation...' : 'Execute Prompt Request'}</span>
+                    <span>{playLoading ? 'Executing...' : 'Execute Prompt Request'}</span>
                   </button>
                 </div>
 
-                {/* Output Panel */}
                 <div className="p-5 rounded-xl bg-[#0b0f17] border border-slate-800 flex flex-col justify-between">
                   <div>
                     <div className="flex items-center justify-between mb-3 pb-2 border-b border-slate-800">
                       <span className="text-xs font-semibold text-white">Execution Result</span>
                       {playResult && (
-                        <div className="flex items-center space-x-3 text-xs font-mono text-slate-400">
-                          <span>{playResult.latency_ms || playResult.response?.latency_ms}ms</span>
-                          <span className="text-emerald-400">
-                            ${(playResult.cost_usd || playResult.response?.cost_usd || 0).toFixed(6)}
-                          </span>
+                        <div className="flex items-center space-x-2 text-xs font-mono">
+                          {playResult.from_cache && (
+                            <span className="px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-400 text-[10px] font-bold">
+                              FROM CACHE (1ms)
+                            </span>
+                          )}
+                          <span className="text-slate-400">{playResult.latency_ms || playResult.timing_ms}ms</span>
                         </div>
                       )}
                     </div>
 
                     {playResult ? (
                       <div className="space-y-3 font-mono text-xs">
-                        <div className="p-3 rounded-lg bg-slate-900/90 border border-slate-800">
-                          <div className="text-[10px] text-slate-400 mb-1">Generated Output Text:</div>
+                        <div className="p-3 rounded-lg bg-slate-900 border border-slate-800">
                           <pre className="whitespace-pre-wrap text-emerald-300">
                             {playResult.output_text || playResult.response?.output_text}
                           </pre>
                         </div>
 
-                        {playResult.shadow_dispatched && (
-                          <div className="p-2.5 rounded-lg bg-purple-950/20 border border-purple-500/30 text-[11px] text-purple-300 flex items-center space-x-2">
-                            <Sparkles className="w-3.5 h-3.5 text-purple-400" />
-                            <span>Shadow fork dispatched in background! Check the Shadow Diff tab for evaluation.</span>
+                        {playResult.timing && (
+                          <div className="p-3 rounded-lg bg-slate-900 border border-slate-800 text-[11px] space-y-1">
+                            <div className="text-slate-400 font-bold mb-1">Waterfall Latency Breakdown:</div>
+                            <div className="flex justify-between text-slate-300">
+                              <span>1. Proxy Router Overhead:</span>
+                              <span className="text-indigo-400">{playResult.timing.routing_overhead_us} µs</span>
+                            </div>
+                            <div className="flex justify-between text-slate-300">
+                              <span>2. Provider Model Generation:</span>
+                              <span className="text-indigo-400">{playResult.timing.provider_latency_ms} ms</span>
+                            </div>
+                            <div className="flex justify-between text-white font-bold pt-1 border-t border-slate-800">
+                              <span>Total Roundtrip:</span>
+                              <span className="text-emerald-400">{playResult.timing.total_latency_ms} ms</span>
+                            </div>
                           </div>
                         )}
                       </div>
@@ -1204,7 +1427,7 @@ export default function App() {
                     )}
                   </div>
 
-                  <div className="text-[10px] text-slate-400 font-mono pt-4 border-t border-slate-800/80">
+                  <div className="text-[10px] text-slate-400 font-mono pt-4 border-t border-slate-800">
                     Endpoint: POST /v1/prompts/{selectedPromptId}/execute
                   </div>
                 </div>

@@ -171,6 +171,23 @@ func (c *Client) executeSimulation(ctx context.Context, model string, promptText
 	var completionTokens int
 
 	lower := strings.ToLower(promptText)
+	userQuery := lower
+	if idx := strings.Index(lower, "user input:"); idx != -1 {
+		userQuery = lower[idx+len("user input:"):]
+		if endIdx := strings.Index(userQuery, "\n"); endIdx != -1 {
+			userQuery = userQuery[:endIdx]
+		}
+	} else if idx := strings.Index(lower, "customer input:"); idx != -1 {
+		userQuery = lower[idx+len("customer input:"):]
+		if endIdx := strings.Index(userQuery, "\n"); endIdx != -1 {
+			userQuery = userQuery[:endIdx]
+		}
+	} else if idx := strings.Index(lower, "query:"); idx != -1 {
+		userQuery = lower[idx+len("query:"):]
+		if endIdx := strings.Index(userQuery, "\n"); endIdx != -1 {
+			userQuery = userQuery[:endIdx]
+		}
+	}
 
 	if strings.Contains(lower, "intent") || strings.Contains(lower, "checkout") {
 		// E-commerce classifier response
@@ -178,13 +195,13 @@ func (c *Client) executeSimulation(ctx context.Context, model string, promptText
 		confidence := 0.94
 		urgency := "HIGH"
 
-		if strings.Contains(lower, "refund") || strings.Contains(lower, "money back") || strings.Contains(lower, "return") {
+		if strings.Contains(userQuery, "refund") || strings.Contains(userQuery, "money back") || strings.Contains(userQuery, "return") {
 			intent = "REFUND"
 			urgency = "MED"
-		} else if strings.Contains(lower, "broken") || strings.Contains(lower, "wrong") || strings.Contains(lower, "complaint") || strings.Contains(lower, "terrible") {
+		} else if strings.Contains(userQuery, "broken") || strings.Contains(userQuery, "damaged") || strings.Contains(userQuery, "late") || strings.Contains(userQuery, "complaint") || strings.Contains(userQuery, "terrible") {
 			intent = "COMPLAINT"
 			urgency = "HIGH"
-		} else if strings.Contains(lower, "when") || strings.Contains(lower, "how") || strings.Contains(lower, "specs") || strings.Contains(lower, "size") {
+		} else if strings.Contains(userQuery, "when") || strings.Contains(userQuery, "how") || strings.Contains(userQuery, "specs") || strings.Contains(userQuery, "size") || strings.Contains(userQuery, "what") || strings.Contains(userQuery, "warranty") {
 			intent = "INQUIRY"
 			urgency = "LOW"
 		}

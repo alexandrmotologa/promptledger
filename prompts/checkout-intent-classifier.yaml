@@ -11,6 +11,14 @@ routing:
         enabled: true
         version: v1.4.0-shadow
         sample_rate: 0.25
+    bandit:
+        enabled: false
+        epsilon: 0.1
+        quality_weight: 0.5
+        latency_weight: 0.25
+        cost_weight: 0.25
+        min_runs_to_exploit: 5
+    fallback_version: v1.2.0
 gates:
     min_quality_score: 0.88
     max_p95_latency_ms: 320
@@ -18,6 +26,20 @@ gates:
     min_sample_size: 20
     auto_promote: true
     auto_rollback: true
+evaluations:
+    - type: json_schema
+      pattern: intent,confidence
+    - type: banned_words
+      banned_words:
+        - hallucination
+        - confidential
+        - internal_error
+budget:
+    max_daily_cost_usd: 25
+    fallback_model: gemini-2.0-flash
+cache:
+    enabled: true
+    ttl_seconds: 3600
 versions:
     v1.2.0:
         model: gpt-4o-mini

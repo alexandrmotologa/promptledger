@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/alexandrmotologa/promptledger/internal/api"
+	"github.com/alexandrmotologa/promptledger/internal/cache"
+	"github.com/alexandrmotologa/promptledger/internal/eval"
 	"github.com/alexandrmotologa/promptledger/internal/evaluator"
 	"github.com/alexandrmotologa/promptledger/internal/gate"
 	"github.com/alexandrmotologa/promptledger/internal/provider"
@@ -43,6 +45,7 @@ func main() {
 	rootCmd.AddCommand(rollbackCmd())
 	rootCmd.AddCommand(statusCmd())
 	rootCmd.AddCommand(diffCmd())
+	rootCmd.AddCommand(evalCmd())
 
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -83,10 +86,11 @@ func serveCmd() *cobra.Command {
 			// 3. Components
 			r := router.NewRouter(reg)
 			p := provider.NewClient()
-			eval := evaluator.NewEvaluator(s, p, 4, 500)
-			defer eval.Stop()
+			evalPool := evaluator.NewEvaluator(s, p, 4, 500)
+			defer evalPool.Stop()
 
 			gm := gate.NewGateManager(reg, s)
+			c := cache.NewCache()
 
 			// 4. Embedded static UI
 			staticFS, err := web.GetFS()
@@ -94,7 +98,7 @@ func serveCmd() *cobra.Command {
 				fmt.Printf("[warning] could not load embedded web filesystem: %v\n", err)
 			}
 
-			srv := api.NewServer(reg, r, p, s, eval, gm, staticFS)
+			srv := api.NewServer(reg, r, p, s, evalPool, gm, c, staticFS)
 
 			addr := fmt.Sprintf(":%d", port)
 			httpServer := &http.Server{
@@ -107,7 +111,8 @@ func serveCmd() *cobra.Command {
 			go func() {
 				fmt.Printf("\n🚀 Daemon listening on http://127.0.0.1:%d\n", port)
 				fmt.Printf("📊 React 19 Experimentation Studio: http://127.0.0.1:%d/\n", port)
-				fmt.Printf("⚡ Proxy Router Endpoint: POST http://127.0.0.1:%d/v1/prompts/{prompt_id}/execute\n\n", port)
+				fmt.Printf("⚡ Proxy Router Endpoint: POST http://127.0.0.1:%d/v1/prompts/{prompt_id}/execute\n", port)
+				fmt.Printf("📈 Prometheus Metrics Endpoint: GET http://127.0.0.1:%d/metrics\n\n", port)
 				if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 					fmt.Printf("HTTP server error: %v\n", err)
 				}
@@ -131,7 +136,7 @@ func serveCmd() *cobra.Command {
 func validateCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "validate [directory or file]",
-		Short: "Validate prompt YAML specs, template variables, and routing configuration",
+		Short: "Validate prompt YAML specs, template variables, assertions, and routing configuration",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			targetDir := promptsDir
 			if len(args) > 0 {
@@ -170,14 +175,24 @@ func validateCmd() *cobra.Command {
 				}
 
 				totalVars := 0
-				for vName, vDetail := range spec.Versions {
+				for _, vDetail := range spec.Versions {
 					vVars := registry.ExtractTemplateVariables(vDetail.Template)
 					totalVars += len(vVars)
-					_ = vName
 				}
 
-				fmt.Printf("✓ %s (Prompt ID: %s, Active: %s, %d variants, %d versions, %d variables detected)\n",
-					filepath.Base(path), spec.PromptID, spec.Routing.ActiveVersion, len(spec.Routing.Variants), len(spec.Versions), totalVars)
+				strategy := spec.Routing.Strategy
+				if spec.Routing.Bandit.Enabled {
+					strategy += " (bandit-enabled)"
+				}
+
+				assertionsCount := len(spec.Evaluations)
+				caching := "off"
+				if spec.Cache.Enabled {
+					caching = fmt.Sprintf("on (%ds TTL)", spec.Cache.TTLSeconds)
+				}
+
+				fmt.Printf("✓ %s (Prompt ID: %s, Strategy: %s, %d versions, %d vars, %d assertions, cache: %s)\n",
+					filepath.Base(path), spec.PromptID, strategy, len(spec.Versions), totalVars, assertionsCount, caching)
 			}
 
 			if hasErrors {
@@ -187,6 +202,65 @@ func validateCmd() *cobra.Command {
 			return nil
 		},
 	}
+}
+
+func evalCmd() *cobra.Command {
+	var promptID string
+	var version string
+	var datasetPath string
+
+	cmd := &cobra.Command{
+		Use:   "eval",
+		Short: "Run offline benchmark on a golden JSONL dataset for CI/CD pre-merge validation",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if promptID == "" {
+				return fmt.Errorf("--prompt flag is required")
+			}
+			if datasetPath == "" {
+				datasetPath = "evals/checkout_intent_eval.jsonl"
+			}
+
+			reg, err := registry.NewRegistry(promptsDir)
+			if err != nil {
+				return err
+			}
+
+			spec, ok := reg.GetPrompt(promptID)
+			if !ok {
+				return fmt.Errorf("prompt '%s' not found", promptID)
+			}
+
+			targetVer := version
+			if targetVer == "" {
+				targetVer = spec.Routing.ActiveVersion
+			}
+
+			prov := provider.NewClient()
+			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+			defer cancel()
+
+			fmt.Printf("Running golden evaluation on '%s' (%s) using dataset '%s'...\n\n", promptID, targetVer, datasetPath)
+			report, err := eval.RunEvaluation(ctx, spec, targetVer, datasetPath, prov)
+			if err != nil {
+				return err
+			}
+
+			fmt.Print(report.MarkdownSummary)
+
+			if report.AccuracyRate < spec.Gates.MinQualityScore && spec.Gates.MinQualityScore > 0 {
+				return fmt.Errorf("evaluation failed: accuracy %.1f%% below minimum quality gate %.1f%%",
+					report.AccuracyRate*100, spec.Gates.MinQualityScore*100)
+			}
+
+			fmt.Printf("\n✓ Evaluation PASSED (Quality gate: ≥%.1f%%)\n", spec.Gates.MinQualityScore*100)
+			return nil
+		},
+	}
+
+	cmd.Flags().StringVar(&promptID, "prompt", "", "Prompt ID to evaluate")
+	cmd.Flags().StringVar(&version, "version", "", "Version to evaluate (defaults to active)")
+	cmd.Flags().StringVar(&datasetPath, "dataset", "evals/checkout_intent_eval.jsonl", "Path to JSONL golden test dataset")
+	return cmd
 }
 
 func promoteCmd() *cobra.Command {
@@ -269,23 +343,16 @@ func rollbackCmd() *cobra.Command {
 func statusCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "status",
-		Short: "Inspect registered prompts, active traffic splits, and shadow mode status",
+		Short: "Inspect registered prompts, active traffic splits, caching, and shadow mode status",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			reg, err := registry.NewRegistry(promptsDir)
 			if err != nil {
 				return err
 			}
 
-			dbPath := filepath.Join(dataDir, "promptledger.db")
-			s, err := store.NewStore(dbPath)
-			if err != nil {
-				return err
-			}
-			defer s.Close()
-
 			prompts := reg.ListPrompts()
-			fmt.Printf("\n%-30s | %-12s | %-24s | %-22s\n", "PROMPT ID", "ACTIVE VER", "TRAFFIC DISTRIBUTION", "SHADOW EVALUATION")
-			fmt.Println(strings.Repeat("-", 95))
+			fmt.Printf("\n%-28s | %-10s | %-18s | %-10s | %-22s\n", "PROMPT ID", "ACTIVE VER", "STRATEGY / SPLIT", "CACHE", "SHADOW EVALUATION")
+			fmt.Println(strings.Repeat("-", 100))
 
 			for _, p := range prompts {
 				var splits []string
@@ -293,13 +360,21 @@ func statusCmd() *cobra.Command {
 					splits = append(splits, fmt.Sprintf("%s (%d%%)", v.Version, v.Weight))
 				}
 				splitStr := strings.Join(splits, ", ")
+				if p.Routing.Strategy == "bandit" || p.Routing.Bandit.Enabled {
+					splitStr = "Bandit Adaptive"
+				}
+
+				cacheStr := "Off"
+				if p.Cache.Enabled {
+					cacheStr = fmt.Sprintf("On (%ds)", p.Cache.TTLSeconds)
+				}
 
 				shadowStr := "Disabled"
 				if p.Routing.Shadow.Enabled {
 					shadowStr = fmt.Sprintf("%s (%.0f%% sample)", p.Routing.Shadow.Version, p.Routing.Shadow.SampleRate*100)
 				}
 
-				fmt.Printf("%-30s | %-12s | %-24s | %-22s\n", p.PromptID, p.Routing.ActiveVersion, splitStr, shadowStr)
+				fmt.Printf("%-28s | %-10s | %-18s | %-10s | %-22s\n", p.PromptID, p.Routing.ActiveVersion, splitStr, cacheStr, shadowStr)
 			}
 			fmt.Println()
 			return nil

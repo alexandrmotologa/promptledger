@@ -10,8 +10,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/alexandrmotologa/promptledger/internal/cache"
+	"github.com/alexandrmotologa/promptledger/internal/eval"
 	"github.com/alexandrmotologa/promptledger/internal/evaluator"
 	"github.com/alexandrmotologa/promptledger/internal/gate"
+	"github.com/alexandrmotologa/promptledger/internal/metrics"
 	"github.com/alexandrmotologa/promptledger/internal/provider"
 	"github.com/alexandrmotologa/promptledger/internal/registry"
 	"github.com/alexandrmotologa/promptledger/internal/router"
@@ -21,14 +24,16 @@ import (
 
 // Server coordinates routing, execution, analytics, and studio delivery.
 type Server struct {
-	registry    *registry.Registry
-	router      *router.Router
-	provider    provider.Provider
-	store       *store.Store
-	evaluator   *evaluator.Evaluator
-	gateManager *gate.GateManager
-	staticFS    fs.FS
-	mux         *http.ServeMux
+	registry        *registry.Registry
+	router          *router.Router
+	provider        provider.Provider
+	store           *store.Store
+	evaluator       *evaluator.Evaluator
+	gateManager     *gate.GateManager
+	cache           *cache.Cache
+	metricsExporter *metrics.Exporter
+	staticFS        fs.FS
+	mux             *http.ServeMux
 }
 
 // NewServer builds an API server instance.
@@ -37,39 +42,53 @@ func NewServer(
 	r *router.Router,
 	p provider.Provider,
 	s *store.Store,
-	eval *evaluator.Evaluator,
+	evalPool *evaluator.Evaluator,
 	gm *gate.GateManager,
+	c *cache.Cache,
 	staticFS fs.FS,
 ) *Server {
-	srv := &Server{
-		registry:    reg,
-		router:      r,
-		provider:    p,
-		store:       s,
-		evaluator:   eval,
-		gateManager: gm,
-		staticFS:    staticFS,
-		mux:         http.NewServeMux(),
+	if c == nil {
+		c = cache.NewCache()
 	}
 
-	eval.SetGateEvaluator(gm)
+	exporter := metrics.NewExporter(reg, s, c)
+
+	srv := &Server{
+		registry:        reg,
+		router:          r,
+		provider:        p,
+		store:           s,
+		evaluator:       evalPool,
+		gateManager:     gm,
+		cache:           c,
+		metricsExporter: exporter,
+		staticFS:        staticFS,
+		mux:             http.NewServeMux(),
+	}
+
+	evalPool.SetGateEvaluator(gm)
 	srv.registerRoutes()
 	return srv
 }
 
 func (s *Server) registerRoutes() {
+	// Prometheus metrics endpoint
+	s.mux.Handle("/metrics", s.metricsExporter)
+
 	// API routes
 	s.mux.HandleFunc("/v1/prompts", s.handlePrompts)
 	s.mux.HandleFunc("/v1/prompts/", s.handlePromptSubroutes)
 	s.mux.HandleFunc("/v1/analytics/summary", s.handleAnalyticsSummary)
 	s.mux.HandleFunc("/v1/audit-logs", s.handleAuditLogs)
 	s.mux.HandleFunc("/v1/simulate-traffic", s.handleSimulateTraffic)
+	s.mux.HandleFunc("/v1/cache/stats", s.handleCacheStats)
+	s.mux.HandleFunc("/v1/cache/clear", s.handleCacheClear)
 
 	// Static web studio
 	if s.staticFS != nil {
 		fileServer := http.FileServer(http.FS(s.staticFS))
 		s.mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-			if strings.HasPrefix(r.URL.Path, "/v1/") {
+			if strings.HasPrefix(r.URL.Path, "/v1/") || r.URL.Path == "/metrics" {
 				http.NotFound(w, r)
 				return
 			}
@@ -162,6 +181,10 @@ func (s *Server) handlePromptSubroutes(w http.ResponseWriter, r *http.Request) {
 		s.handlePromptRuns(w, r, promptID)
 	case "shadow-diff":
 		s.handleShadowDiff(w, r, promptID)
+	case "bandit":
+		s.handleBanditStats(w, r, promptID)
+	case "eval":
+		s.handleDatasetEval(w, r, promptID)
 	case "test":
 		s.handleTest(w, r, promptID)
 	default:
@@ -175,19 +198,29 @@ type ExecuteRequest struct {
 	Variables map[string]interface{} `json:"variables"`
 }
 
+type WaterfallTiming struct {
+	RoutingOverheadUs int64 `json:"routing_overhead_us"`
+	ProviderLatencyMs int64 `json:"provider_latency_ms"`
+	TotalLatencyMs    int64 `json:"total_latency_ms"`
+}
+
 type ExecuteResponse struct {
-	ID               string  `json:"id"`
-	PromptID         string  `json:"prompt_id"`
-	Version          string  `json:"version"`
-	VariantType      string  `json:"variant_type"`
-	OutputText       string  `json:"output_text"`
-	ModelUsed        string  `json:"model_used"`
-	LatencyMs        int64   `json:"latency_ms"`
-	PromptTokens     int     `json:"prompt_tokens"`
-	CompletionTokens int     `json:"completion_tokens"`
-	TotalTokens      int     `json:"total_tokens"`
-	CostUSD          float64 `json:"cost_usd"`
-	ShadowDispatched bool    `json:"shadow_dispatched"`
+	ID               string           `json:"id"`
+	PromptID         string           `json:"prompt_id"`
+	Version          string           `json:"version"`
+	VariantType      string           `json:"variant_type"`
+	OutputText       string           `json:"output_text"`
+	ModelUsed        string           `json:"model_used"`
+	LatencyMs        int64            `json:"latency_ms"`
+	PromptTokens     int              `json:"prompt_tokens"`
+	CompletionTokens int              `json:"completion_tokens"`
+	TotalTokens      int              `json:"total_tokens"`
+	CostUSD          float64          `json:"cost_usd"`
+	FromCache        bool             `json:"from_cache"`
+	BudgetDownscaled bool             `json:"budget_downscaled"`
+	ShadowDispatched bool             `json:"shadow_dispatched"`
+	AssertionsPassed bool             `json:"assertions_passed"`
+	Timing           WaterfallTiming  `json:"timing"`
 }
 
 func (s *Server) handleExecute(w http.ResponseWriter, r *http.Request, promptID string) {
@@ -196,35 +229,136 @@ func (s *Server) handleExecute(w http.ResponseWriter, r *http.Request, promptID 
 		return
 	}
 
+	startTotal := time.Now()
+
 	var req ExecuteRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "Invalid JSON body: "+err.Error(), http.StatusBadRequest)
 		return
 	}
 
-	// 1. Route request deterministically
+	spec, ok := s.registry.GetPrompt(promptID)
+	if !ok {
+		http.Error(w, fmt.Sprintf("prompt '%s' not found", promptID), http.StatusNotFound)
+		return
+	}
+
+	// 1. Measure and route request
+	routeStart := time.Now()
 	selected, shadow, err := s.router.Route(promptID, req.UserID, req.TenantID)
+	routingOverheadUs := time.Since(routeStart).Microseconds()
 	if err != nil {
 		http.Error(w, "Routing error: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	// 2. Render prompt template
+	// 2. Check semantic cache if enabled
+	cacheKey := ""
+	if spec.Cache.Enabled && s.cache != nil {
+		cacheKey = cache.GenerateKey(promptID, selected.Version, req.Variables)
+		if cachedResp, hit := s.cache.Get(cacheKey); hit {
+			totalMs := time.Since(startTotal).Milliseconds()
+			if totalMs == 0 {
+				totalMs = 1
+			}
+
+			resp := ExecuteResponse{
+				ID:               "cache_" + uuid.New().String()[:12],
+				PromptID:         promptID,
+				Version:          selected.Version,
+				VariantType:      selected.VariantType,
+				OutputText:       cachedResp.OutputText,
+				ModelUsed:        cachedResp.ModelUsed,
+				LatencyMs:        1,
+				PromptTokens:     cachedResp.PromptTokens,
+				CompletionTokens: cachedResp.CompletionTokens,
+				TotalTokens:      cachedResp.TotalTokens,
+				CostUSD:          0.0, // 100% saved
+				FromCache:        true,
+				ShadowDispatched: false,
+				AssertionsPassed: true,
+				Timing: WaterfallTiming{
+					RoutingOverheadUs: routingOverheadUs,
+					ProviderLatencyMs: 0,
+					TotalLatencyMs:    totalMs,
+				},
+			}
+			writeJSON(w, http.StatusOK, resp)
+			return
+		}
+	}
+
+	// 3. Check budget guardrails & model downscale
+	modelTarget := selected.Model
+	budgetDownscaled := false
+	if spec.Budget.MaxDailyCostUSD > 0 && spec.Budget.FallbackModel != "" {
+		m, _ := s.store.GetPromptMetrics(promptID)
+		dailySpend := 0.0
+		if m != nil {
+			for _, vm := range m.Versions {
+				dailySpend += vm.TotalCostUSD
+			}
+		}
+		if dailySpend >= spec.Budget.MaxDailyCostUSD {
+			modelTarget = spec.Budget.FallbackModel
+			budgetDownscaled = true
+		}
+	}
+
+	// 4. Render prompt template
 	rendered, err := registry.RenderTemplate(selected.Template, req.Variables)
 	if err != nil {
 		http.Error(w, "Template render error: "+err.Error(), http.StatusBadRequest)
 		return
 	}
 
-	// 3. Execute prompt synchronously for client
+	// 5. Execute prompt with fallback circuit breaker
 	ctx, cancel := context.WithTimeout(r.Context(), 25*time.Second)
 	defer cancel()
 
-	res, err := s.provider.Execute(ctx, selected.Model, rendered, nil)
+	provStart := time.Now()
+	res, err := s.provider.Execute(ctx, modelTarget, rendered, nil)
+	provLatencyMs := time.Since(provStart).Milliseconds()
+
+	// Fallback chain trigger if model invocation failed
+	if err != nil && selected.FallbackVersion != "" && selected.FallbackVersion != selected.Version {
+		if fbDetail, exists := spec.Versions[selected.FallbackVersion]; exists {
+			fbRendered, fbErr := registry.RenderTemplate(fbDetail.Template, req.Variables)
+			if fbErr == nil {
+				res, err = s.provider.Execute(ctx, fbDetail.Model, fbRendered, nil)
+				if err == nil {
+					selected.Version = selected.FallbackVersion
+					selected.Model = fbDetail.Model
+					rendered = fbRendered
+				}
+			}
+		}
+	}
+
 	if err != nil {
 		http.Error(w, "Execution error: "+err.Error(), http.StatusBadGateway)
 		return
 	}
+
+	// 6. Check custom assertions if configured
+	assertionsPassed := true
+	if len(spec.Evaluations) > 0 {
+		aRes := evaluator.EvaluateAssertions(res.OutputText, spec.Evaluations)
+		assertionsPassed = aRes.AllPassed
+	}
+
+	// 7. Store in semantic cache if enabled
+	if spec.Cache.Enabled && s.cache != nil && cacheKey != "" {
+		ttl := time.Duration(spec.Cache.TTLSeconds) * time.Second
+		s.cache.Set(cacheKey, res, ttl)
+	}
+
+	// 8. Record bandit feedback if applicable
+	quality := 0.95
+	if !assertionsPassed {
+		quality = 0.50
+	}
+	s.router.GetBanditManager().RecordFeedback(promptID, selected.Version, quality, res.LatencyMs, res.CostUSD, &spec.Routing.Bandit)
 
 	execID := "exec_" + uuid.New().String()[:12]
 	activeRecord := &store.ExecutionRecord{
@@ -249,7 +383,7 @@ func (s *Server) handleExecute(w http.ResponseWriter, r *http.Request, promptID 
 
 	_ = s.store.RecordExecution(activeRecord)
 
-	// 4. Non-blocking shadow dispatch if sampled
+	// 9. Non-blocking shadow dispatch if sampled
 	shadowDispatched := false
 	if shadow != nil {
 		shadowDispatched = s.evaluator.Submit(&evaluator.ShadowTask{
@@ -259,6 +393,8 @@ func (s *Server) handleExecute(w http.ResponseWriter, r *http.Request, promptID 
 			Variables:       req.Variables,
 		})
 	}
+
+	totalMs := time.Since(startTotal).Milliseconds()
 
 	resp := ExecuteResponse{
 		ID:               execID,
@@ -272,7 +408,15 @@ func (s *Server) handleExecute(w http.ResponseWriter, r *http.Request, promptID 
 		CompletionTokens: res.CompletionTokens,
 		TotalTokens:      res.TotalTokens,
 		CostUSD:          res.CostUSD,
+		FromCache:        false,
+		BudgetDownscaled: budgetDownscaled,
 		ShadowDispatched: shadowDispatched,
+		AssertionsPassed: assertionsPassed,
+		Timing: WaterfallTiming{
+			RoutingOverheadUs: routingOverheadUs,
+			ProviderLatencyMs: provLatencyMs,
+			TotalLatencyMs:    totalMs,
+		},
 	}
 
 	writeJSON(w, http.StatusOK, resp)
@@ -297,7 +441,6 @@ func (s *Server) handlePromote(w http.ResponseWriter, r *http.Request, promptID 
 
 	targetVer := req.Version
 	if targetVer == "" {
-		// Find first non-active version
 		for _, v := range spec.Routing.Variants {
 			if v.Version != spec.Routing.ActiveVersion {
 				targetVer = v.Version
@@ -369,7 +512,7 @@ func (s *Server) handleUpdateRouting(w http.ResponseWriter, r *http.Request, pro
 	_ = s.store.RecordAuditEvent(&store.AuditEventRecord{
 		PromptID:    promptID,
 		Action:      "routing_update",
-		Reason:      "Manual traffic routing adjustment",
+		Reason:      fmt.Sprintf("Traffic routing adjustment (Strategy: %s)", req.Strategy),
 		TriggeredBy: "studio_user",
 		CreatedAt:   time.Now(),
 	})
@@ -387,7 +530,6 @@ func (s *Server) handlePromptMetrics(w http.ResponseWriter, r *http.Request, pro
 	spec, ok := s.registry.GetPrompt(promptID)
 	if ok {
 		metrics.ActiveVersion = spec.Routing.ActiveVersion
-		// Evaluate candidate state
 		for _, v := range spec.Routing.Variants {
 			if v.Version != spec.Routing.ActiveVersion && v.Weight > 0 {
 				vm := metrics.Versions[v.Version]
@@ -420,6 +562,68 @@ func (s *Server) handleShadowDiff(w http.ResponseWriter, r *http.Request, prompt
 		return
 	}
 	writeJSON(w, http.StatusOK, diffs)
+}
+
+func (s *Server) handleBanditStats(w http.ResponseWriter, r *http.Request, promptID string) {
+	stats := s.router.GetBanditManager().GetArmStats(promptID)
+	writeJSON(w, http.StatusOK, stats)
+}
+
+func (s *Server) handleDatasetEval(w http.ResponseWriter, r *http.Request, promptID string) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req struct {
+		Version string `json:"version"`
+		Dataset string `json:"dataset"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&req)
+
+	spec, ok := s.registry.GetPrompt(promptID)
+	if !ok {
+		http.Error(w, "Prompt not found", http.StatusNotFound)
+		return
+	}
+
+	version := req.Version
+	if version == "" {
+		version = spec.Routing.ActiveVersion
+	}
+
+	datasetPath := req.Dataset
+	if datasetPath == "" {
+		datasetPath = "evals/checkout_intent_eval.jsonl"
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 45*time.Second)
+	defer cancel()
+
+	report, err := eval.RunEvaluation(ctx, spec, version, datasetPath, s.provider)
+	if err != nil {
+		http.Error(w, "Benchmark execution failed: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, report)
+}
+
+func (s *Server) handleCacheStats(w http.ResponseWriter, r *http.Request) {
+	stats := s.cache.GetStats()
+	writeJSON(w, http.StatusOK, stats)
+}
+
+func (s *Server) handleCacheClear(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	s.cache.Clear()
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"success": true,
+		"message": "Semantic cache flushed successfully",
+	})
 }
 
 func (s *Server) handleTest(w http.ResponseWriter, r *http.Request, promptID string) {
@@ -463,17 +667,24 @@ func (s *Server) handleTest(w http.ResponseWriter, r *http.Request, promptID str
 	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 	defer cancel()
 
+	start := time.Now()
 	res, err := s.provider.Execute(ctx, vDetail.Model, rendered, nil)
 	if err != nil {
 		http.Error(w, "Execution error: "+err.Error(), http.StatusBadGateway)
 		return
 	}
 
+	timingMs := time.Since(start).Milliseconds()
+
+	assertionsResult := evaluator.EvaluateAssertions(res.OutputText, spec.Evaluations)
+
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"version":           ver,
 		"model":             vDetail.Model,
 		"rendered_template": rendered,
 		"response":          res,
+		"timing_ms":         timingMs,
+		"assertions":        assertionsResult,
 	})
 }
 
@@ -484,7 +695,6 @@ func (s *Server) handleAnalyticsSummary(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// Calculate active canaries count
 	canaryCount := 0
 	for _, p := range s.registry.ListPrompts() {
 		for _, v := range p.Routing.Variants {
@@ -618,6 +828,9 @@ func (s *Server) handleSimulateTraffic(w http.ResponseWriter, r *http.Request) {
 		}
 
 		_ = s.store.RecordExecution(rec)
+
+		// Record bandit feedback
+		s.router.GetBanditManager().RecordFeedback(sample.promptID, selected.Version, 0.94, res.LatencyMs, res.CostUSD, nil)
 
 		if shadow != nil {
 			s.evaluator.Submit(&evaluator.ShadowTask{

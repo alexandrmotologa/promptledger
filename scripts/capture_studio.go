@@ -74,9 +74,19 @@ func main() {
 	}
 
 	simulateReq(35)
-	time.Sleep(1500 * time.Millisecond) // Allow async shadow workers to process
+	time.Sleep(1500 * time.Millisecond)
 
-	// Trigger a promotion and rollback to populate audit history
+	// Seed cache hit by sending identical requests
+	cacheBody := []byte(`{"user_id":"cache_user","variables":{"UserInput":"Do you offer international shipping?","Context":"Guest"}}`)
+	_, _ = http.Post(fmt.Sprintf("%s/v1/prompts/checkout-intent-classifier/execute", studioURL), "application/json", bytes.NewReader(cacheBody))
+	_, _ = http.Post(fmt.Sprintf("%s/v1/prompts/checkout-intent-classifier/execute", studioURL), "application/json", bytes.NewReader(cacheBody))
+	_, _ = http.Post(fmt.Sprintf("%s/v1/prompts/checkout-intent-classifier/execute", studioURL), "application/json", bytes.NewReader(cacheBody))
+
+	// Trigger benchmark execution
+	evalBody := []byte(`{"version":"v1.2.0","dataset":"evals/checkout_intent_eval.jsonl"}`)
+	_, _ = http.Post(fmt.Sprintf("%s/v1/prompts/checkout-intent-classifier/eval", studioURL), "application/json", bytes.NewReader(evalBody))
+
+	// Trigger promotion and rollback to populate audit history
 	_, _ = http.Post(fmt.Sprintf("%s/v1/prompts/checkout-intent-classifier/promote", studioURL), "application/json", bytes.NewReader([]byte(`{"version":"v1.3.0-canary"}`)))
 	time.Sleep(200 * time.Millisecond)
 	simulateReq(10)
@@ -132,6 +142,13 @@ func main() {
 			delay:    800 * time.Millisecond,
 		},
 		{
+			tab:      "benchmarks",
+			filename: "promptledger_golden_evals.png",
+			width:    1440,
+			height:   900,
+			delay:    800 * time.Millisecond,
+		},
+		{
 			tab:      "playground",
 			filename: "promptledger_playground.png",
 			width:    1440,
@@ -171,7 +188,7 @@ func main() {
 	gifFramesDir, _ := os.MkdirTemp("", "promptledger_gif_frames_*")
 	defer os.RemoveAll(gifFramesDir)
 
-	gifTabs := []string{"overview", "registry", "routing", "shadow", "gates", "playground"}
+	gifTabs := []string{"overview", "registry", "routing", "shadow", "gates", "benchmarks", "playground"}
 	for idx, gTab := range gifTabs {
 		framePath := filepath.Join(gifFramesDir, fmt.Sprintf("frame_%02d.png", idx))
 		targetURL := fmt.Sprintf("%s/?tab=%s", studioURL, gTab)
@@ -188,7 +205,6 @@ func main() {
 	}
 
 	gifOutPath := filepath.Join(imagesDir, "promptledger_demo.gif")
-	// Compile gif with ffmpeg with 1.4s delay per frame and optimal palette
 	cmdFfmpeg := exec.Command("ffmpeg", "-y",
 		"-framerate", "0.75",
 		"-i", filepath.Join(gifFramesDir, "frame_%02d.png"),
@@ -204,5 +220,4 @@ func main() {
 	fmt.Println("=== Completed promptledger Authentic Asset Generation ===")
 }
 
-// ensure context package is used
 var _ = context.Background

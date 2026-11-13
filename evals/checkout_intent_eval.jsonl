@@ -1,0 +1,5 @@
+{"id":"tc_01","input":{"UserInput":"Can I pay with PayPal or Apple Pay right now?","Context":"Cart: 2 items"},"expected_intent":"PURCHASE"}
+{"id":"tc_02","input":{"UserInput":"I want to return this defective laptop charger and get my money back","Context":"Order #8812"},"expected_intent":"REFUND"}
+{"id":"tc_03","input":{"UserInput":"The package was completely damaged and late by two weeks","Context":"Courier status: Delayed"},"expected_intent":"COMPLAINT"}
+{"id":"tc_04","input":{"UserInput":"What is the battery life and warranty period for this model?","Context":"Browsing tech catalog"},"expected_intent":"INQUIRY"}
+{"id":"tc_05","input":{"UserInput":"Please process the checkout for the annual subscription now","Context":"Cart checkout"},"expected_intent":"PURCHASE"}

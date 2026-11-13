@@ -12,69 +12,112 @@ import (
 
 // SelectedVariant represents the chosen version to serve the request.
 type SelectedVariant struct {
-	PromptID    string
-	Version     string
-	IsCanary    bool
-	Model       string
-	Template    string
-	Weight      int
-	VariantType string // "active", "canary", "shadow"
+	PromptID        string
+	Version         string
+	IsCanary        bool
+	Model           string
+	Template        string
+	Weight          int
+	VariantType     string // "active", "canary", "shadow", "bandit"
+	IsExploration   bool   // for Multi-Armed Bandit
+	FallbackVersion string
+	FallbackModel   string
 }
 
-// Router handles sticky and weighted traffic splitting and shadow fork dispatch.
+// Router handles sticky, weighted, bandit traffic splitting and shadow fork dispatch.
 type Router struct {
-	mu       sync.RWMutex
-	registry *registry.Registry
+	mu            sync.RWMutex
+	registry      *registry.Registry
+	banditManager *BanditManager
 }
 
-// NewRouter creates a new traffic router backed by the registry.
+// NewRouter creates a new traffic router backed by the registry and bandit manager.
 func NewRouter(reg *registry.Registry) *Router {
 	return &Router{
-		registry: reg,
+		registry:      reg,
+		banditManager: NewBanditManager(),
 	}
 }
 
+// GetBanditManager returns the active bandit instance.
+func (r *Router) GetBanditManager() *BanditManager {
+	return r.banditManager
+}
+
 // Route determines which prompt variant to serve for a given request.
-// If userID or tenantID is provided, it uses deterministic sticky hashing.
 func (r *Router) Route(promptID string, userID string, tenantID string) (*SelectedVariant, *SelectedVariant, error) {
 	spec, ok := r.registry.GetPrompt(promptID)
 	if !ok {
 		return nil, nil, fmt.Errorf("prompt '%s' not found", promptID)
 	}
 
-	if len(spec.Routing.Variants) == 0 {
-		return nil, nil, fmt.Errorf("no routing variants configured for '%s'", promptID)
+	if len(spec.Versions) == 0 {
+		return nil, nil, fmt.Errorf("no versions configured for '%s'", promptID)
 	}
 
-	bucket := r.computeBucket(promptID, userID, tenantID)
-
 	var selected *SelectedVariant
-	cumWeight := 0
 
-	for _, v := range spec.Routing.Variants {
-		cumWeight += v.Weight
-		if bucket < cumWeight {
-			vDetail, exists := spec.Versions[v.Version]
-			if !exists {
-				return nil, nil, fmt.Errorf("version '%s' not found in spec", v.Version)
+	// Check if Multi-Armed Bandit routing is enabled
+	if spec.Routing.Strategy == "bandit" || spec.Routing.Bandit.Enabled {
+		// Collect candidate arms
+		var arms []string
+		for v := range spec.Versions {
+			if v != spec.Routing.Shadow.Version {
+				arms = append(arms, v)
 			}
+		}
 
-			isCanary := v.Version != spec.Routing.ActiveVersion
-			vType := "active"
-			if isCanary {
-				vType = "canary"
-			}
+		chosenArm, isExplored := r.banditManager.SelectArm(
+			promptID,
+			arms,
+			spec.Routing.Bandit.Epsilon,
+			spec.Routing.Bandit.MinRunsToExploit,
+		)
 
+		if vDetail, exists := spec.Versions[chosenArm]; exists {
 			selected = &SelectedVariant{
-				PromptID:    promptID,
-				Version:     v.Version,
-				IsCanary:    isCanary,
-				Model:       vDetail.Model,
-				Template:    vDetail.Template,
-				Weight:      v.Weight,
-				VariantType: vType,
+				PromptID:      promptID,
+				Version:       chosenArm,
+				IsCanary:      chosenArm != spec.Routing.ActiveVersion,
+				Model:         vDetail.Model,
+				Template:      vDetail.Template,
+				Weight:        0,
+				VariantType:   "bandit",
+				IsExploration: isExplored,
 			}
-			break
+		}
+	}
+
+	// Standard weighted / canary routing fallback
+	if selected == nil {
+		bucket := r.computeBucket(promptID, userID, tenantID)
+		cumWeight := 0
+
+		for _, v := range spec.Routing.Variants {
+			cumWeight += v.Weight
+			if bucket < cumWeight {
+				vDetail, exists := spec.Versions[v.Version]
+				if !exists {
+					return nil, nil, fmt.Errorf("version '%s' not found in spec", v.Version)
+				}
+
+				isCanary := v.Version != spec.Routing.ActiveVersion
+				vType := "active"
+				if isCanary {
+					vType = "canary"
+				}
+
+				selected = &SelectedVariant{
+					PromptID:    promptID,
+					Version:     v.Version,
+					IsCanary:    isCanary,
+					Model:       vDetail.Model,
+					Template:    vDetail.Template,
+					Weight:      v.Weight,
+					VariantType: vType,
+				}
+				break
+			}
 		}
 	}
 
@@ -90,6 +133,20 @@ func (r *Router) Route(promptID string, userID string, tenantID string) (*Select
 			Template:    vDetail.Template,
 			Weight:      100,
 			VariantType: "active",
+		}
+	}
+
+	// Set fallback version if configured
+	if spec.Routing.FallbackVersion != "" && spec.Routing.FallbackVersion != selected.Version {
+		if fbDetail, exists := spec.Versions[spec.Routing.FallbackVersion]; exists {
+			selected.FallbackVersion = spec.Routing.FallbackVersion
+			selected.FallbackModel = fbDetail.Model
+		}
+	} else if spec.Routing.ActiveVersion != selected.Version {
+		// Default fallback to active version
+		if actDetail, exists := spec.Versions[spec.Routing.ActiveVersion]; exists {
+			selected.FallbackVersion = spec.Routing.ActiveVersion
+			selected.FallbackModel = actDetail.Model
 		}
 	}
 

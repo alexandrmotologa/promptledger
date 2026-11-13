@@ -9,6 +9,15 @@ export interface ShadowConfig {
   sample_rate: number;
 }
 
+export interface BanditConfig {
+  enabled: boolean;
+  epsilon: number;
+  quality_weight: number;
+  latency_weight: number;
+  cost_weight: number;
+  min_runs_to_exploit: number;
+}
+
 export interface GateConfig {
   min_quality_score: number;
   max_p95_latency_ms: number;
@@ -16,6 +25,24 @@ export interface GateConfig {
   min_sample_size: number;
   auto_promote: boolean;
   auto_rollback: boolean;
+}
+
+export interface AssertionSpec {
+  type: string;
+  pattern?: string;
+  banned_words?: string[];
+  rubric?: string;
+  threshold?: number;
+}
+
+export interface BudgetConfig {
+  max_daily_cost_usd: number;
+  fallback_model: string;
+}
+
+export interface CacheConfig {
+  enabled: boolean;
+  ttl_seconds: number;
 }
 
 export interface VersionDetail {
@@ -36,8 +63,13 @@ export interface PromptSpec {
     active_version: string;
     variants: VariantConfig[];
     shadow: ShadowConfig;
+    bandit?: BanditConfig;
+    fallback_version?: string;
   };
   gates: GateConfig;
+  evaluations?: AssertionSpec[];
+  budget?: BudgetConfig;
+  cache?: CacheConfig;
   versions: Record<string, VersionDetail>;
   file_path?: string;
   updated_at?: string;
@@ -80,11 +112,35 @@ export interface SystemSummary {
   active_canaries: number;
 }
 
+export interface CacheStats {
+  total_lookups: number;
+  hits: number;
+  misses: number;
+  hit_ratio: number;
+  total_latency_saved_ms: number;
+  total_dollars_saved: number;
+  cached_items_count: number;
+}
+
+export interface ArmStats {
+  trials: number;
+  avg_quality: number;
+  avg_latency_ms: number;
+  avg_cost_usd: number;
+  average_reward: number;
+}
+
+export interface WaterfallTiming {
+  routing_overhead_us: number;
+  provider_latency_ms: number;
+  total_latency_ms: number;
+}
+
 export interface ExecutionRecord {
   id: string;
   prompt_id: string;
   version: string;
-  variant_type: 'active' | 'canary' | 'shadow';
+  variant_type: 'active' | 'canary' | 'shadow' | 'bandit';
   user_id: string;
   tenant_id: string;
   input_variables: Record<string, any>;
@@ -99,6 +155,9 @@ export interface ExecutionRecord {
   is_success: boolean;
   error_message?: string;
   created_at: string;
+  from_cache?: boolean;
+  budget_downscaled?: boolean;
+  timing?: WaterfallTiming;
 }
 
 export interface ShadowComparisonRecord {
@@ -129,4 +188,30 @@ export interface AuditEventRecord {
   reason: string;
   triggered_by: string;
   created_at: string;
+}
+
+export interface CaseResult {
+  index: number;
+  passed: boolean;
+  latency_ms: number;
+  cost_usd: number;
+  output_text: string;
+  failure_notes?: string;
+}
+
+export interface EvaluationReport {
+  prompt_id: string;
+  version: string;
+  model: string;
+  dataset_path: string;
+  total_cases: number;
+  passed_cases: number;
+  failed_cases: number;
+  accuracy_rate: number;
+  avg_latency_ms: number;
+  p95_latency_ms: number;
+  total_cost_usd: number;
+  execution_time_ms: number;
+  results: CaseResult[];
+  markdown_summary: string;
 }
