@@ -1,0 +1,41 @@
+version: ""
+prompt_id: test-classifier
+description: ""
+routing:
+    strategy: ""
+    active_version: v1.0.0
+    variants:
+        - version: v1.0.0
+          weight: 90
+        - version: v1.1.0-canary
+          weight: 10
+    shadow:
+        enabled: true
+        version: v1.2.0-shadow
+        sample_rate: 0.1
+gates:
+    min_quality_score: 0
+    max_p95_latency_ms: 0
+    max_error_rate: 0
+    min_sample_size: 0
+    auto_promote: false
+    auto_rollback: false
+versions:
+    v1.0.0:
+        model: gpt-4o-mini
+        template: Hello {{.UserInput}}
+        author: ""
+        commit: ""
+        created_at: 0001-01-01T00:00:00Z
+    v1.1.0-canary:
+        model: claude-3-5-haiku
+        template: Hi {{.UserInput}}
+        author: ""
+        commit: ""
+        created_at: 0001-01-01T00:00:00Z
+    v1.2.0-shadow:
+        model: gemini-2.0-flash
+        template: Hey {{.UserInput}}
+        author: ""
+        commit: ""
+        created_at: 0001-01-01T00:00:00Z

@@ -1,0 +1,12 @@
+server:
+  port: 8080
+  prompts_dir: "./prompts"
+  data_dir: ".promptledger"
+
+evaluator:
+  workers: 4
+  queue_size: 500
+
+storage:
+  driver: "sqlite"
+  wal_mode: true

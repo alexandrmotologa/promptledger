@@ -1,0 +1,20 @@
+# Binaries
+bin/
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Data and SQLite WAL
+.promptledger/
+*.db
+*.db-wal
+*.db-shm
+
+# Node & Web
+web/node_modules/
+web/dist/
+
+# Temp
+tmp/
+*.tmp

@@ -1,0 +1,67 @@
+version: "1"
+prompt_id: checkout-intent-classifier
+description: Determines user intent during e-commerce checkout flow with category extraction
+routing:
+    strategy: canary
+    active_version: v1.3.0-canary
+    variants:
+        - version: v1.3.0-canary
+          weight: 100
+    shadow:
+        enabled: true
+        version: v1.4.0-shadow
+        sample_rate: 0.25
+gates:
+    min_quality_score: 0.88
+    max_p95_latency_ms: 320
+    max_error_rate: 0.01
+    min_sample_size: 20
+    auto_promote: true
+    auto_rollback: true
+versions:
+    v1.2.0:
+        model: gpt-4o-mini
+        template: |
+            You are an expert e-commerce intent classifier assistant.
+            Classify the user input into exactly one of: [PURCHASE, INQUIRY, COMPLAINT, REFUND].
+
+            User Input: {{.UserInput}}
+
+            Respond strictly with JSON:
+            {"intent": "PURCHASE|INQUIRY|COMPLAINT|REFUND", "confidence": 0.95, "reasoning": "summary"}
+        author: alex@promptledger.dev
+        commit: 7b4c91a
+        created_at: 2026-11-10T14:20:00Z
+    v1.3.0-canary:
+        model: claude-3-5-haiku
+        template: |
+            You are a high-accuracy e-commerce intent classifier agent.
+            Carefully evaluate customer intent from the following allowed categories:
+            - PURCHASE: Ready to buy, cart inquiries, checkout issues.
+            - INQUIRY: Product specs, shipping time, general queries.
+            - COMPLAINT: Delivery delays, defective items, bad service.
+            - REFUND: Return requests, chargebacks, refund status.
+
+            Customer Context: {{.Context}}
+            Customer Input: {{.UserInput}}
+
+            Output strictly valid JSON:
+            {"intent": "CATEGORY", "confidence": 0.98, "urgency": "LOW|MED|HIGH", "reasoning": "concise rationale"}
+        author: elena@promptledger.dev
+        commit: c9e2f41
+        created_at: 2026-11-12T09:15:00Z
+    v1.4.0-shadow:
+        model: gemini-2.0-flash
+        template: |
+            You are an ultra-fast production e-commerce routing model.
+            Identify customer intention with high semantic precision.
+            Allowed tags: [PURCHASE, INQUIRY, COMPLAINT, REFUND].
+
+            Context: {{.Context}}
+            Query: {{.UserInput}}
+
+            Return minimal JSON without markdown fences:
+            {"intent": "CATEGORY", "confidence": 0.99, "action": "ESCALATE|AUTOMATE|ROUTE", "sentiment": "POSITIVE|NEUTRAL|NEGATIVE"}
+        author: marcus@promptledger.dev
+        commit: e1d4902
+        created_at: 2026-11-13T18:00:00Z

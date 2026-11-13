@@ -1,0 +1,72 @@
+version: "1"
+prompt_id: "customer-support-rag-router"
+description: "Dispatches incoming technical support tickets to documentation or escalation tiers"
+
+routing:
+  strategy: "canary"
+  active_version: "v2.0.0"
+  variants:
+    - version: "v2.0.0"
+      weight: 85
+    - version: "v2.1.0-canary"
+      weight: 15
+  shadow:
+    enabled: true
+    version: "v2.2.0-shadow"
+    sample_rate: 0.20
+
+gates:
+  min_quality_score: 0.90
+  max_p95_latency_ms: 450
+  max_error_rate: 0.015
+  min_sample_size: 25
+  auto_promote: false
+  auto_rollback: true
+
+versions:
+  v2.0.0:
+    model: "gpt-4o"
+    author: "sarah@promptledger.dev"
+    commit: "4d1a890"
+    created_at: 2026-11-05T11:00:00Z
+    template: |
+      Analyze the customer technical issue. Route to appropriate tier:
+      [TIER_1_DOCS, TIER_2_BILLING, TIER_3_ENGINEERING].
+      
+      User Issue: {{.IssueDescription}}
+      Customer Tier: {{.CustomerTier}}
+      
+      Return JSON:
+      {"target_tier": "TIER_X", "recommended_doc_ids": ["DOC-102"], "summary": "brief summary"}
+
+  v2.1.0-canary:
+    model: "claude-3-5-sonnet"
+    author: "dmitri@promptledger.dev"
+    commit: "6f8b211"
+    created_at: 2026-11-11T16:45:00Z
+    template: |
+      You are an enterprise technical support triaging engine.
+      Inspect customer problem, prioritize severity and determine routing destination:
+      [TIER_1_DOCS, TIER_2_BILLING, TIER_3_ENGINEERING, SECURITY_ESCALATION].
+      
+      Customer Tier: {{.CustomerTier}}
+      Issue Description: {{.IssueDescription}}
+      Telemetry State: {{.TelemetryState}}
+      
+      Output strictly JSON:
+      {"target_tier": "TIER_X", "severity": "P1|P2|P3|P4", "recommended_doc_ids": ["DOC-102"], "summary": "brief summary"}
+
+  v2.2.0-shadow:
+    model: "gemini-2.0-flash"
+    author: "alex@promptledger.dev"
+    commit: "9c3e441"
+    created_at: 2026-11-13T10:10:00Z
+    template: |
+      High-throughput support triage agent.
+      Determine tier: [TIER_1_DOCS, TIER_2_BILLING, TIER_3_ENGINEERING, SECURITY_ESCALATION].
+      
+      Customer Tier: {{.CustomerTier}}
+      Issue: {{.IssueDescription}}
+      
+      Output JSON:
+      {"target_tier": "TIER_X", "confidence": 0.96, "severity": "P2", "summary": "issue overview"}
