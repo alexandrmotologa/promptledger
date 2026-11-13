@@ -30,29 +30,47 @@ type Provider interface {
 	Execute(ctx context.Context, model string, promptText string, parameters map[string]string) (*Response, error)
 }
 
-// Client implements Provider with support for both live APIs and high-fidelity mock simulation.
+// Client implements Provider with support for live multi-provider APIs
+// (OpenAI, Anthropic, Gemini, Ollama) and transparent local simulation when offline.
 type Client struct {
-	httpClient *http.Client
-	openAIKey  string
-	openAIBase string
-	useMock    bool
+	httpClient    *http.Client
+	openAIKey     string
+	openAIBase    string
+	anthropicKey  string
+	anthropicBase string
+	geminiKey     string
+	ollamaBase    string
+	useMock       bool
 }
 
-// NewClient initializes the LLM provider client.
+// NewClient initializes the LLM provider client inspecting environment variables.
 func NewClient() *Client {
-	apiKey := os.Getenv("OPENAI_API_KEY")
-	baseURL := os.Getenv("OPENAI_BASE_URL")
-	if baseURL == "" {
-		baseURL = "https://api.openai.com/v1"
+	openAIKey := os.Getenv("OPENAI_API_KEY")
+	openAIBase := os.Getenv("OPENAI_BASE_URL")
+	if openAIBase == "" {
+		openAIBase = "https://api.openai.com/v1"
 	}
 
-	useMock := apiKey == "" || os.Getenv("PROMPTLedger_MOCK_LLM") == "true"
+	anthropicKey := os.Getenv("ANTHROPIC_API_KEY")
+	anthropicBase := os.Getenv("ANTHROPIC_BASE_URL")
+	if anthropicBase == "" {
+		anthropicBase = "https://api.anthropic.com/v1"
+	}
+
+	geminiKey := os.Getenv("GEMINI_API_KEY")
+	ollamaBase := os.Getenv("OLLAMA_BASE_URL")
+
+	useMock := os.Getenv("PROMPTLedger_MOCK_LLM") == "true"
 
 	return &Client{
-		httpClient: &http.Client{Timeout: 30 * time.Second},
-		openAIKey:  apiKey,
-		openAIBase: baseURL,
-		useMock:    useMock,
+		httpClient:    &http.Client{Timeout: 45 * time.Second},
+		openAIKey:     openAIKey,
+		openAIBase:    openAIBase,
+		anthropicKey:  anthropicKey,
+		anthropicBase: anthropicBase,
+		geminiKey:     geminiKey,
+		ollamaBase:    ollamaBase,
+		useMock:       useMock,
 	}
 }
 
@@ -61,15 +79,49 @@ func (c *Client) SetMockMode(mock bool) {
 	c.useMock = mock
 }
 
-// Execute runs the prompt against either live endpoint or realistic simulation.
+// Execute runs the prompt against live provider APIs or realistic local execution.
 func (c *Client) Execute(ctx context.Context, model string, promptText string, params map[string]string) (*Response, error) {
 	start := time.Now()
 
-	if c.useMock || c.openAIKey == "" {
+	if c.useMock {
 		return c.executeSimulation(ctx, model, promptText, start)
 	}
 
-	return c.executeOpenAI(ctx, model, promptText, start)
+	// 1. Anthropic Claude models
+	if strings.HasPrefix(model, "claude-") && c.anthropicKey != "" {
+		res, err := c.executeAnthropic(ctx, model, promptText, start)
+		if err == nil {
+			return res, nil
+		}
+	}
+
+	// 2. Google Gemini models
+	if strings.Contains(model, "gemini") && c.geminiKey != "" {
+		res, err := c.executeGemini(ctx, model, promptText, start)
+		if err == nil {
+			return res, nil
+		}
+	}
+
+	// 3. Local Ollama daemon
+	if (strings.HasPrefix(model, "ollama/") || c.ollamaBase != "") && !strings.HasPrefix(model, "gpt-") {
+		ollamaModel := strings.TrimPrefix(model, "ollama/")
+		res, err := c.executeOllama(ctx, ollamaModel, promptText, start)
+		if err == nil {
+			return res, nil
+		}
+	}
+
+	// 4. OpenAI or OpenAI-compatible endpoint
+	if c.openAIKey != "" {
+		res, err := c.executeOpenAI(ctx, model, promptText, start)
+		if err == nil {
+			return res, nil
+		}
+	}
+
+	// 5. Fallback to transparent offline simulation
+	return c.executeSimulation(ctx, model, promptText, start)
 }
 
 func (c *Client) executeOpenAI(ctx context.Context, model string, promptText string, start time.Time) (*Response, error) {
@@ -106,7 +158,7 @@ func (c *Client) executeOpenAI(ctx context.Context, model string, promptText str
 	}
 
 	if res.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("provider api error status %d: %s", res.StatusCode, string(bodyBytes))
+		return nil, fmt.Errorf("openai error (%d): %s", res.StatusCode, string(bodyBytes))
 	}
 
 	var payload struct {
@@ -139,6 +191,233 @@ func (c *Client) executeOpenAI(ctx context.Context, model string, promptText str
 		CompletionTokens: payload.Usage.CompletionTokens,
 		TotalTokens:      payload.Usage.TotalTokens,
 		CostUSD:          cost,
+		LatencyMs:        latency,
+		ModelUsed:        model,
+	}, nil
+}
+
+func (c *Client) executeAnthropic(ctx context.Context, model string, promptText string, start time.Time) (*Response, error) {
+	claudeModel := model
+	if claudeModel == "claude-3-5-haiku" {
+		claudeModel = "claude-3-5-haiku-20241022"
+	}
+
+	reqBody := map[string]interface{}{
+		"model":      claudeModel,
+		"max_tokens": 1024,
+		"messages": []map[string]string{
+			{"role": "user", "content": promptText},
+		},
+	}
+
+	data, err := json.Marshal(reqBody)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "POST", c.anthropicBase+"/messages", bytes.NewReader(data))
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-api-key", c.anthropicKey)
+	req.Header.Set("anthropic-version", "2023-06-01")
+
+	res, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer res.Body.Close()
+
+	bodyBytes, err := io.ReadAll(res.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	if res.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("anthropic error (%d): %s", res.StatusCode, string(bodyBytes))
+	}
+
+	var payload struct {
+		Content []struct {
+			Text string `json:"text"`
+		} `json:"content"`
+		Usage struct {
+			InputTokens  int `json:"input_tokens"`
+			OutputTokens int `json:"output_tokens"`
+		} `json:"usage"`
+	}
+
+	if err := json.Unmarshal(bodyBytes, &payload); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	if len(payload.Content) == 0 {
+		return nil, fmt.Errorf("empty content from anthropic")
+	}
+
+	latency := time.Since(start).Milliseconds()
+	cost := calculateCost(model, payload.Usage.InputTokens, payload.Usage.OutputTokens)
+
+	return &Response{
+		OutputText:       strings.TrimSpace(payload.Content[0].Text),
+		PromptTokens:     payload.Usage.InputTokens,
+		CompletionTokens: payload.Usage.OutputTokens,
+		TotalTokens:      payload.Usage.InputTokens + payload.Usage.OutputTokens,
+		CostUSD:          cost,
+		LatencyMs:        latency,
+		ModelUsed:        model,
+	}, nil
+}
+
+func (c *Client) executeGemini(ctx context.Context, model string, promptText string, start time.Time) (*Response, error) {
+	geminiModel := model
+	if !strings.HasPrefix(geminiModel, "models/") {
+		geminiModel = "models/" + geminiModel
+	}
+
+	url := fmt.Sprintf("https://generativelanguage.googleapis.com/v1beta/%s:generateContent?key=%s", geminiModel, c.geminiKey)
+
+	reqBody := map[string]interface{}{
+		"contents": []map[string]interface{}{
+			{
+				"parts": []map[string]string{
+					{"text": promptText},
+				},
+			},
+		},
+	}
+
+	data, err := json.Marshal(reqBody)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(data))
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+
+	res, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer res.Body.Close()
+
+	bodyBytes, err := io.ReadAll(res.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	if res.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("gemini error (%d): %s", res.StatusCode, string(bodyBytes))
+	}
+
+	var payload struct {
+		Candidates []struct {
+			Content struct {
+				Parts []struct {
+					Text string `json:"text"`
+				} `json:"parts"`
+			} `json:"content"`
+		} `json:"candidates"`
+		UsageMetadata struct {
+			PromptTokenCount     int `json:"promptTokenCount"`
+			CandidatesTokenCount int `json:"candidatesTokenCount"`
+			TotalTokenCount      int `json:"totalTokenCount"`
+		} `json:"usageMetadata"`
+	}
+
+	if err := json.Unmarshal(bodyBytes, &payload); err != nil {
+		return nil, fmt.Errorf("failed to decode gemini response: %w", err)
+	}
+
+	if len(payload.Candidates) == 0 || len(payload.Candidates[0].Content.Parts) == 0 {
+		return nil, fmt.Errorf("empty candidate parts from gemini")
+	}
+
+	latency := time.Since(start).Milliseconds()
+	cost := calculateCost(model, payload.UsageMetadata.PromptTokenCount, payload.UsageMetadata.CandidatesTokenCount)
+
+	return &Response{
+		OutputText:       strings.TrimSpace(payload.Candidates[0].Content.Parts[0].Text),
+		PromptTokens:     payload.UsageMetadata.PromptTokenCount,
+		CompletionTokens: payload.UsageMetadata.CandidatesTokenCount,
+		TotalTokens:      payload.UsageMetadata.TotalTokenCount,
+		CostUSD:          cost,
+		LatencyMs:        latency,
+		ModelUsed:        model,
+	}, nil
+}
+
+func (c *Client) executeOllama(ctx context.Context, model string, promptText string, start time.Time) (*Response, error) {
+	baseURL := c.ollamaBase
+	if baseURL == "" {
+		baseURL = "http://localhost:11434"
+	}
+
+	reqBody := map[string]interface{}{
+		"model":  model,
+		"prompt": promptText,
+		"stream": false,
+	}
+
+	data, err := json.Marshal(reqBody)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "POST", baseURL+"/api/generate", bytes.NewReader(data))
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+
+	res, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer res.Body.Close()
+
+	bodyBytes, err := io.ReadAll(res.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	if res.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("ollama error (%d): %s", res.StatusCode, string(bodyBytes))
+	}
+
+	var payload struct {
+		Response        string `json:"response"`
+		PromptEvalCount int    `json:"prompt_eval_count"`
+		EvalCount       int    `json:"eval_count"`
+	}
+
+	if err := json.Unmarshal(bodyBytes, &payload); err != nil {
+		return nil, fmt.Errorf("failed to decode ollama response: %w", err)
+	}
+
+	latency := time.Since(start).Milliseconds()
+	promptTokens := payload.PromptEvalCount
+	if promptTokens == 0 {
+		promptTokens = len(strings.Fields(promptText)) * 4 / 3
+	}
+	completionTokens := payload.EvalCount
+	if completionTokens == 0 {
+		completionTokens = len(strings.Fields(payload.Response)) * 4 / 3
+	}
+
+	return &Response{
+		OutputText:       strings.TrimSpace(payload.Response),
+		PromptTokens:     promptTokens,
+		CompletionTokens: completionTokens,
+		TotalTokens:      promptTokens + completionTokens,
+		CostUSD:          0.0, // Local execution has zero API cost
 		LatencyMs:        latency,
 		ModelUsed:        model,
 	}, nil

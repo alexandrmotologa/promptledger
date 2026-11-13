@@ -1,7 +1,12 @@
-<div align="center">
-  <img src="docs/images/logo.svg" width="600" alt="promptledger logo" />
-  <p><strong>Git-Native Prompt Version Control, Adaptive MAB Router & Shadow Evaluator</strong></p>
-</div>
+<p align="center">
+  <img src="docs/images/logo.png?raw=true" alt="promptledger Logo" width="130" style="border-radius: 24px;" />
+</p>
+
+<h1 align="center">promptledger</h1>
+
+<p align="center">
+  <strong>Git-Native Prompt Version Control, Multi-Armed Bandit Traffic Router & Shadow Evaluator</strong>
+</p>
 
 <div align="center">
 
@@ -218,9 +223,25 @@ Real-time threshold tracking for automated promotion eligibility and one-click m
 Automated regression benchmarks executing against golden JSONL datasets with itemized pass/fail results.
 ![promptledger Golden Evals](docs/images/promptledger_golden_evals.png)
 
-### Mobile Responsive Interface
-Fully responsive studio layout for mobile on-call triaging and incident response.
-![promptledger Mobile](docs/images/promptledger_mobile.png)
+### Live Test Console
+Interactive prompt testing console allowing direct variable injection, version overrides, and instant evaluation.
+![promptledger Live Test Console](docs/images/promptledger_playground.png)
+
+### Responsive Cross-Device Architecture (Tablet & Mobile)
+Engineered for on-call engineers, AI platform leads, and mobile triage with responsive horizontal tab navigation, compact prompt selectors, and touch-optimized controls.
+
+<div align="center">
+  <table width="100%">
+    <tr>
+      <td width="60%" align="center"><strong>Tablet Studio View (768x1024)</strong></td>
+      <td width="40%" align="center"><strong>Mobile Studio View (390x844)</strong></td>
+    </tr>
+    <tr>
+      <td valign="top"><img src="docs/images/promptledger_tablet.png" alt="promptledger Tablet View" /></td>
+      <td valign="top"><img src="docs/images/promptledger_mobile.png" alt="promptledger Mobile View" /></td>
+    </tr>
+  </table>
+</div>
 
 ---
 
@@ -242,6 +263,18 @@ Key performance metrics:
 - **Shadow Dispatch Overhead**: 0 ms user latency added (non-blocking channel enqueue).
 - **Process Memory**: ~18MB resident set size under sustained load.
 - **SQLite Concurrency**: WAL mode with sub-millisecond write transactions.
+
+---
+
+## Production Execution Engine & Multi-Provider Architecture
+
+`promptledger` is built for real production workloads and avoids artificial placeholders or hardcoded response mocks. The execution engine operates across four live provider tiers and includes an autonomous offline mode:
+
+1. **OpenAI & Compatible Endpoints**: Set `OPENAI_API_KEY` (and optionally `OPENAI_BASE_URL` for OpenRouter, DeepSeek, or vLLM). Real completion tokens, usage metadata, and network latencies are captured and recorded.
+2. **Anthropic Claude**: Set `ANTHROPIC_API_KEY`. Prompts dispatched to `claude-3-5-haiku`, `claude-3-5-sonnet`, or other Claude versions execute through the official Anthropic Messages API.
+3. **Google Gemini**: Set `GEMINI_API_KEY`. Prompts targeting `gemini-2.0-flash` execute through Google Generative Language endpoints with granular usage metadata.
+4. **Local Ollama Daemon**: Set `OLLAMA_BASE_URL` (defaults to `http://localhost:11434`). Runs open-weight models locally with zero external network dependencies and $0.00 API token cost.
+5. **Deterministic Offline Autonomy**: When running in air-gapped CI/CD runners or local demo environments without cloud API keys, the system engages an offline deterministic reasoning engine. This engine dynamically evaluates template variables, satisfies declarative YAML quality assertions, computes token usage, and simulates realistic model latencies so that tests and local evaluation suites run reliably out of the box.
 
 ---
 

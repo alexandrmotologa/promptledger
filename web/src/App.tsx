@@ -41,7 +41,27 @@ import {
 } from './types';
 
 export default function App() {
-  const [tab, setTab] = useState<'overview' | 'registry' | 'routing' | 'shadow' | 'gates' | 'benchmarks' | 'playground'>('overview');
+  const getInitialTab = (): 'overview' | 'registry' | 'routing' | 'shadow' | 'gates' | 'benchmarks' | 'playground' => {
+    if (typeof window !== 'undefined') {
+      const params = new URLSearchParams(window.location.search);
+      const t = params.get('tab');
+      if (t && ['overview', 'registry', 'routing', 'shadow', 'gates', 'benchmarks', 'playground'].includes(t)) {
+        return t as any;
+      }
+    }
+    return 'overview';
+  };
+
+  const [tab, setTabState] = useState<'overview' | 'registry' | 'routing' | 'shadow' | 'gates' | 'benchmarks' | 'playground'>(getInitialTab);
+
+  const setTab = (newTab: 'overview' | 'registry' | 'routing' | 'shadow' | 'gates' | 'benchmarks' | 'playground') => {
+    setTabState(newTab);
+    if (typeof window !== 'undefined') {
+      const url = new URL(window.location.href);
+      url.searchParams.set('tab', newTab);
+      window.history.replaceState({}, '', url.toString());
+    }
+  };
   const [prompts, setPrompts] = useState<PromptSpec[]>([]);
   const [selectedPromptId, setSelectedPromptId] = useState<string>('');
   const [summary, setSummary] = useState<SystemSummary | null>(null);
@@ -473,8 +493,55 @@ export default function App() {
 
       {/* Main Container Layout */}
       <div className="flex-1 flex flex-col md:flex-row max-w-[1780px] w-full mx-auto">
-        {/* Left Sidebar Navigation */}
-        <nav className="w-full md:w-64 border-b md:border-b-0 md:border-r border-slate-800/80 bg-[#090d16] p-4 flex flex-col space-y-6">
+        {/* Mobile & Tablet Compact Nav Header */}
+        <div className="md:hidden flex flex-col space-y-2.5 p-3 bg-[#090d16] border-b border-slate-800">
+          <div className="flex items-center justify-between">
+            <span className="text-[10px] font-mono uppercase tracking-wider text-slate-400 font-semibold">Active Prompt:</span>
+            <select
+              value={selectedPromptId}
+              onChange={(e) => setSelectedPromptId(e.target.value)}
+              aria-label="Select Active Prompt"
+              className="bg-slate-900 border border-slate-700 text-white text-xs rounded-lg px-2.5 py-1 font-mono focus:outline-none focus:border-indigo-500 max-w-[240px] truncate"
+            >
+              {prompts.map(p => (
+                <option key={p.prompt_id} value={p.prompt_id}>
+                  {p.prompt_id} ({p.routing.active_version})
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className="flex space-x-1.5 overflow-x-auto pb-1 no-scrollbar">
+            {[
+              { id: 'overview', label: 'Overview', icon: Activity },
+              { id: 'registry', label: 'Prompt Specs', icon: GitBranch },
+              { id: 'routing', label: 'Traffic & Bandit', icon: SlidersHorizontal },
+              { id: 'shadow', label: 'Shadow Diff', icon: Eye },
+              { id: 'gates', label: 'Safety Gates', icon: ShieldAlert },
+              { id: 'benchmarks', label: 'Golden Evals', icon: FileCheck2 },
+              { id: 'playground', label: 'Live Console', icon: Terminal },
+            ].map(item => {
+              const Icon = item.icon;
+              const active = tab === item.id;
+              return (
+                <button
+                  key={item.id}
+                  onClick={() => setTab(item.id as any)}
+                  className={`flex items-center space-x-1.5 px-3 py-1.5 rounded-lg text-xs font-medium whitespace-nowrap shrink-0 transition ${
+                    active
+                      ? 'bg-indigo-600 text-white shadow-sm'
+                      : 'bg-slate-800/80 text-slate-400 hover:text-slate-200'
+                  }`}
+                >
+                  <Icon className="w-3.5 h-3.5" />
+                  <span>{item.label}</span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        {/* Desktop Left Sidebar Navigation */}
+        <nav className="hidden md:flex w-64 border-r border-slate-800/80 bg-[#090d16] p-4 flex-col space-y-6 shrink-0">
           <div>
             <div className="text-[11px] font-mono uppercase tracking-wider text-slate-400 px-3 mb-2 font-semibold">
               Select Prompt
@@ -567,7 +634,7 @@ export default function App() {
         </nav>
 
         {/* Main Workspace Pane */}
-        <main className="flex-1 p-6 overflow-y-auto">
+        <main className="flex-1 p-4 md:p-6 overflow-y-auto">
           {/* TAB 1: OVERVIEW */}
           {tab === 'overview' && (
             <div className="space-y-6">
